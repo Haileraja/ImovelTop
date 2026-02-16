@@ -1,0 +1,20 @@
+# Node
+node_modules/
+dist/
+.env
+
+# Vite cache
+.vite/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Backend local files
+/backend/.env
+/backend/imobiliaria.db
+
+# Editor
+.vscode/
+.DS_Store
