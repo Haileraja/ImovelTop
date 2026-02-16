@@ -8,8 +8,8 @@ import os
 from dotenv import load_dotenv
 from passlib.context import CryptContext
 
-from .database import get_session
-from .models import User
+from database import get_session
+from models import User
 
 # load environment variables from backend/.env (if present)
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))

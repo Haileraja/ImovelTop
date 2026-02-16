@@ -1,4 +1,4 @@
-from .models import User, Property
+from models import User, Property
 from passlib.context import CryptContext
 from sqlmodel import select
 

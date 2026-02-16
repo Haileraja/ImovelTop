@@ -7,10 +7,10 @@ from uuid import uuid4
 
 from sqlmodel import Session, select
 
-from .database import create_db_and_tables, engine
-from .models import Property, User
-from .initial_data import seed
-from .security import create_access_token, get_current_user, require_roles
+from database import create_db_and_tables, engine
+from models import Property, User
+from initial_data import seed
+from security import create_access_token, get_current_user, require_roles
 
 
 def user_to_dict(user: User) -> Dict[str, Any]:
