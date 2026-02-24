@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Property, PropertyType } from '../types/property';
 import { Card, CardContent, CardHeader, CardTitle } from './ui/card';
 import { Button } from './ui/button';
@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Switch } from './ui/switch';
 import { PlusCircle, ArrowLeft, X } from 'lucide-react';
 import { toast } from 'sonner';
+import api from '../api';
 
 interface AddPropertyFormProps {
   onAdd: (property: Omit<Property, 'id' | 'vendedorId' | 'vendedorNome' | 'createdAt'>) => void;
@@ -33,12 +34,17 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
     piscina: false,
     jardim: false,
     anoConstructao: '',
-    certificadoEnergetico: 'B',
     caracteristicas: [] as string[],
     newCaracteristica: '',
     galeria: [] as string[],
     newImageUrl: ''
   });
+  const [mainImageFile, setMainImageFile] = useState<File | null>(null);
+  const [galleryFiles, setGalleryFiles] = useState<File[]>([]);
+  const [mainPreview, setMainPreview] = useState<string | null>(null);
+  const [galleryPreviews, setGalleryPreviews] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -49,7 +55,12 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
     }
 
     const mainImage = formData.imagem || 'https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxtb2Rlcm4lMjBob3VzZSUyMGV4dGVyaW9yfGVufDF8fHx8MTc3MTE4MjI5OXww&ixlib=rb-4.1.0&q=80&w=1080';
-    
+    // ensure gallery includes the main image (avoid duplicates)
+    const gallery = [...formData.galeria];
+    if (mainImage && !gallery.includes(mainImage)) {
+      gallery.unshift(mainImage);
+    }
+
     const property = {
       titulo: formData.titulo,
       descricao: formData.descricao,
@@ -60,20 +71,80 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
       tipologia: formData.tipologia,
       area: parseFloat(formData.area),
       imagem: mainImage,
-      galeria: formData.galeria.length > 0 ? formData.galeria : [mainImage],
+      galeria: gallery.length > 0 ? gallery : [mainImage],
       quartos: parseInt(formData.quartos),
       casasBanho: parseInt(formData.casasBanho),
       garagem: formData.garagem,
       piscina: formData.piscina,
       jardim: formData.jardim,
       anoConstructao: parseInt(formData.anoConstructao),
-      certificadoEnergetico: formData.certificadoEnergetico,
       caracteristicas: formData.caracteristicas
     };
 
+
+    // if files present, upload using FormData (will also be triggered by visible Upload button)
+    const hasFiles = !!mainImageFile || (galleryFiles && galleryFiles.length > 0);
+    if (hasFiles) {
+      // build FormData and delegate to upload handler
+      const fd = createFormData(property);
+      performUpload(fd, property);
+      return;
+    }
+
+    // no files: fallback to existing flow
     onAdd(property);
     toast.success('Imóvel adicionado com sucesso!');
   };
+
+  function createFormData(property: any) {
+    const fd = new FormData();
+    fd.append('titulo', property.titulo);
+    fd.append('descricao', property.descricao);
+    fd.append('tipo', property.tipo);
+    fd.append('preco', String(property.preco));
+    fd.append('localizacao', property.localizacao);
+    fd.append('cidade', property.cidade);
+    fd.append('tipologia', property.tipologia);
+    fd.append('area', String(property.area));
+    fd.append('quartos', String(property.quartos));
+    fd.append('casasBanho', String(property.casasBanho));
+    fd.append('garagem', JSON.stringify(property.garagem));
+    fd.append('piscina', JSON.stringify(property.piscina));
+    fd.append('jardim', JSON.stringify(property.jardim));
+    fd.append('anoConstructao', String(property.anoConstructao));
+    fd.append('caracteristicas', JSON.stringify(property.caracteristicas || []));
+    if (formData.imagem) fd.append('imagem_url', formData.imagem);
+    if (formData.galeria && formData.galeria.length > 0) fd.append('galeria_urls', JSON.stringify(formData.galeria));
+    if (mainImageFile) fd.append('imagem_file', mainImageFile);
+    galleryFiles.forEach((f) => fd.append('galeria_files', f));
+    return fd;
+  }
+
+  async function performUpload(fd: FormData, property: any) {
+    setUploading(true);
+    setUploadProgress(0);
+    try {
+      // use XHR progress helper
+      const created = await (api as any).uploadPropertyWithProgress(fd, (p: number) => {
+        setUploadProgress(Math.round(p * 100));
+      });
+      if (created) {
+        onAdd(created as any);
+        toast.success('Imóvel adicionado com sucesso!');
+      } else {
+        toast.error('Falha ao adicionar imóvel');
+      }
+    } catch (err) {
+      console.error(err);
+      toast.error('Falha ao adicionar imóvel');
+    } finally {
+      setUploading(false);
+      setUploadProgress(null);
+      // clear selected files
+      setMainImageFile(null);
+      setGalleryFiles([]);
+    }
+  }
 
   const addCaracteristica = () => {
     if (formData.newCaracteristica.trim()) {
@@ -101,6 +172,39 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
       });
     }
   };
+
+  const removeGalleryFile = (index: number) => {
+    setGalleryFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const removeMainImageFile = () => {
+    setMainImageFile(null);
+  };
+
+  // generate previews when files change; clean up object URLs
+  useEffect(() => {
+    // main image preview
+    if (mainImageFile) {
+      const url = URL.createObjectURL(mainImageFile);
+      setMainPreview(url);
+      return () => {
+        URL.revokeObjectURL(url);
+        setMainPreview(null);
+      };
+    } else {
+      setMainPreview(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mainImageFile]);
+
+  useEffect(() => {
+    const urls: string[] = galleryFiles.map(f => URL.createObjectURL(f));
+    setGalleryPreviews(urls);
+    return () => {
+      urls.forEach(u => URL.revokeObjectURL(u));
+      setGalleryPreviews([]);
+    };
+  }, [galleryFiles]);
 
   const removeImageFromGallery = (index: number) => {
     setFormData({
@@ -161,7 +265,7 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
               </div>
               
               <div className="space-y-2">
-                <Label htmlFor="preco">Preço (€) *</Label>
+                <Label htmlFor="preco">Preço (MT) *</Label>
                 <Input 
                   id="preco"
                   type="number"
@@ -179,7 +283,7 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
                   id="localizacao"
                   value={formData.localizacao}
                   onChange={(e) => setFormData({ ...formData, localizacao: e.target.value })}
-                  placeholder="Ex: Cascais"
+                  placeholder="Ex: Polana Cimento"
                 />
               </div>
               
@@ -189,7 +293,7 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
                   id="cidade"
                   value={formData.cidade}
                   onChange={(e) => setFormData({ ...formData, cidade: e.target.value })}
-                  placeholder="Ex: Lisboa"
+                  placeholder="Ex: Maputo"
                 />
               </div>
             </div>
@@ -234,7 +338,7 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
               </div>
             </div>
             
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="casasBanho">Casas de Banho *</Label>
                 <Input 
@@ -257,23 +361,7 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
                 />
               </div>
               
-              <div className="space-y-2">
-                <Label htmlFor="certificadoEnergetico">Cert. Energético *</Label>
-                <Select value={formData.certificadoEnergetico} onValueChange={(value) => setFormData({ ...formData, certificadoEnergetico: value })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="A+">A+</SelectItem>
-                    <SelectItem value="A">A</SelectItem>
-                    <SelectItem value="B">B</SelectItem>
-                    <SelectItem value="C">C</SelectItem>
-                    <SelectItem value="D">D</SelectItem>
-                    <SelectItem value="E">E</SelectItem>
-                    <SelectItem value="F">F</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+
             </div>
             
             <div className="space-y-2">
@@ -284,6 +372,8 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
                 onChange={(e) => setFormData({ ...formData, imagem: e.target.value })}
                 placeholder="Opcional - URL da imagem principal"
               />
+                <div className="text-sm text-muted-foreground mt-1">ou faça upload</div>
+                <input type="file" accept="image/*" onChange={(e) => setMainImageFile(e.target.files?.[0] || null)} />
             </div>
             
             {/* Galeria de Imagens */}
@@ -305,6 +395,33 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
                   <PlusCircle className="w-4 h-4" />
                 </Button>
               </div>
+                <div className="text-sm text-muted-foreground mt-1">ou fazer upload múltiplo</div>
+                <input type="file" accept="image/*" multiple onChange={(e) => setGalleryFiles(Array.from(e.target.files || []))} />
+
+                {/* Previews for selected gallery files and main image */}
+                <div className="flex gap-2 mt-3">
+                  {mainPreview ? (
+                    <div className="relative">
+                      <img src={mainPreview} alt="Preview principal" className="w-28 h-20 object-cover rounded border" />
+                      <button type="button" onClick={removeMainImageFile} className="absolute -top-2 -right-2 bg-destructive text-destructive-foreground rounded-full p-1">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ) : null}
+
+                  {galleryPreviews.map((url, idx) => (
+                    <div key={idx} className="relative group">
+                      <img src={url} alt={`Preview ${idx + 1}`} className="w-20 h-20 object-cover rounded border" />
+                      <button
+                        type="button"
+                        onClick={() => removeGalleryFile(idx)}
+                        className="absolute -top-2 -right-2 bg-destructive text-destructive-foreground rounded-full p-1"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               {formData.galeria.length > 0 && (
                 <div className="flex flex-wrap gap-2 mt-2">
                   {formData.galeria.map((url, index) => (
@@ -400,10 +517,50 @@ export function AddPropertyForm({ onAdd, onCancel, vendedorNome }: AddPropertyFo
               <Button type="button" variant="outline" onClick={onCancel} className="flex-1">
                 Cancelar
               </Button>
-              <Button type="submit" className="flex-1">
-                Adicionar Imóvel
-              </Button>
+              {/* visible upload button when files are selected, otherwise submit behaves as before */}
+              { (mainImageFile || (galleryFiles && galleryFiles.length > 0)) ? (
+                <Button type="button" className="flex-1" onClick={() => {
+                  const mainImage = formData.imagem || '';
+                  const gallery = [...formData.galeria];
+                  if (mainImage && !gallery.includes(mainImage)) gallery.unshift(mainImage);
+                  const property = {
+                    titulo: formData.titulo,
+                    descricao: formData.descricao,
+                    tipo: formData.tipo,
+                    preco: parseFloat(formData.preco || '0'),
+                    localizacao: formData.localizacao,
+                    cidade: formData.cidade,
+                    tipologia: formData.tipologia,
+                    area: parseFloat(formData.area || '0'),
+                    imagem: mainImage,
+                    galeria: gallery,
+                    quartos: parseInt(formData.quartos || '0'),
+                    casasBanho: parseInt(formData.casasBanho || '0'),
+                    garagem: formData.garagem,
+                    piscina: formData.piscina,
+                    jardim: formData.jardim,
+                    anoConstructao: parseInt(formData.anoConstructao || '0'),
+                    caracteristicas: formData.caracteristicas
+                  };
+                  const fd = createFormData(property);
+                  performUpload(fd, property);
+                }} disabled={uploading}>
+                  {uploading ? `Enviando (${uploadProgress || 0}%)` : 'Enviar e Adicionar'}
+                </Button>
+              ) : (
+                <Button type="submit" className="flex-1">
+                  Adicionar Imóvel
+                </Button>
+              )}
             </div>
+            {uploadProgress !== null && (
+              <div className="mt-3">
+                <div className="w-full bg-muted h-2 rounded overflow-hidden">
+                  <div className="h-2 bg-primary" style={{ width: `${uploadProgress}%` }} />
+                </div>
+                <div className="text-sm mt-1">Progresso: {uploadProgress}%</div>
+              </div>
+            )}
           </form>
         </CardContent>
       </Card>

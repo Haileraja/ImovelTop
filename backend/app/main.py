@@ -1,29 +1,180 @@
-from fastapi import FastAPI, Depends, HTTPException, status
-from fastapi.middleware.cors import CORSMiddleware
+import os
+import re
+import json
+import shutil
+import random
+import logging
+import time
+from collections import defaultdict
+from datetime import date, datetime
 from typing import Optional, List, Dict, Any
-from datetime import date
-from pydantic import BaseModel
 from uuid import uuid4
 
+from fastapi import FastAPI, Depends, HTTPException, status, File, UploadFile, Form, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, field_validator
 from sqlmodel import Session, select
+from sqlalchemy import func, text
+import mailtrap as mt
 
-from database import create_db_and_tables, engine
-from models import Property, User
+from database import create_db_and_tables, engine, get_session
+from models import (
+    Property, User, VisitRequest, Favorite, Notification,
+    ChatMessage, Review, PasswordResetToken, EmailVerification,
+)
 from initial_data import seed
-from security import create_access_token, get_current_user, require_roles
+from security import (
+    create_access_token, get_current_user, require_roles,
+    verify_password, get_password_hash,
+)
 
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger("imobiliaria")
+
+# ---------------------------------------------------------------------------
+# Mailtrap config
+# ---------------------------------------------------------------------------
+MAILTRAP_TOKEN = os.getenv("MAILTRAP_TOKEN", "2b21f420a580717f5416c36ce825b36b")
+MAILTRAP_SENDER_EMAIL = os.getenv("MAILTRAP_SENDER_EMAIL", "hello@demomailtrap.co")
+MAILTRAP_SENDER_NAME = os.getenv("MAILTRAP_SENDER_NAME", "ImovelTop")
+
+# Upload constraints
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
+MAX_UPLOAD_SIZE_MB = 10
+MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+# Password policy
+MIN_PASSWORD_LENGTH = 8
+
+# ---------------------------------------------------------------------------
+# Rate limiting (in-memory)
+# ---------------------------------------------------------------------------
+_rate_limit_store: Dict[str, List[float]] = defaultdict(list)
+RATE_LIMIT_WINDOW = 60  # seconds
+RATE_LIMIT_MAX = 10  # max requests per window
+
+
+def check_rate_limit(key: str, max_requests: int = RATE_LIMIT_MAX, window: int = RATE_LIMIT_WINDOW) -> None:
+    """Raise 429 if the key has exceeded max_requests in the last `window` seconds."""
+    now = time.time()
+    timestamps = _rate_limit_store[key]
+    # prune old entries
+    _rate_limit_store[key] = [t for t in timestamps if now - t < window]
+    if len(_rate_limit_store[key]) >= max_requests:
+        raise HTTPException(status_code=429, detail="Demasiadas tentativas. Tente novamente mais tarde.")
+    _rate_limit_store[key].append(now)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def user_to_dict(user: User) -> Dict[str, Any]:
-    return {"id": user.id, "nome": user.nome, "email": user.email, "role": user.role}
+    return {
+        "id": user.id,
+        "nome": user.nome,
+        "email": user.email,
+        "role": user.role,
+        "phone": user.phone,
+        "is_active": user.is_active,
+    }
+
+
+def validate_date_string(value: str) -> str:
+    """Validate ISO date (YYYY-MM-DD). Raises ValueError on bad format or past dates."""
+    try:
+        d = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        raise ValueError("Data inválida. Use o formato AAAA-MM-DD.")
+    if d < date.today():
+        raise ValueError("A data não pode ser no passado.")
+    return value
+
+
+def validate_time_string(value: str) -> str:
+    """Validate time (HH:MM). Raises ValueError on bad format."""
+    if not re.match(r"^\d{2}:\d{2}$", value):
+        raise ValueError("Hora inválida. Use o formato HH:MM.")
+    h, m = int(value[:2]), int(value[3:])
+    if h < 0 or h > 23 or m < 0 or m > 59:
+        raise ValueError("Hora inválida.")
+    return value
+
+
+def validate_password_policy(v: str) -> str:
+    """Full password policy validation."""
+    if len(v) < MIN_PASSWORD_LENGTH:
+        raise ValueError(f"A senha deve ter pelo menos {MIN_PASSWORD_LENGTH} caracteres")
+    if not re.search(r"[A-Za-z]", v):
+        raise ValueError("A senha deve conter pelo menos uma letra")
+    if not re.search(r"[0-9]", v):
+        raise ValueError("A senha deve conter pelo menos um número")
+    return v
+
+
+def save_upload_file(file: UploadFile, uploads_directory: str) -> str:
+    """Validate & save an uploaded image file. Returns the URL path."""
+    validate_upload(file)
+    ext = os.path.splitext(file.filename)[1] or ".jpg"
+    fname = f"{uuid4().hex}{ext}"
+    dest = os.path.join(uploads_directory, fname)
+    with open(dest, "wb") as out_file:
+        shutil.copyfileobj(file.file, out_file)
+    return f"/uploads/{fname}"
+
+
+def build_visit_request_read(req: VisitRequest, prop: Optional[Property], user: Optional[User]) -> "VisitRequestRead":
+    """Build a VisitRequestRead from a VisitRequest + related objects."""
+    return VisitRequestRead(
+        id=req.id,
+        property_id=req.property_id,
+        property_title=prop.titulo if prop else "",
+        user_id=req.user_id,
+        user_name=user.nome if user else "",
+        requested_at=req.requested_at,
+        preferred_date=req.preferred_date or None,
+        preferred_time=req.preferred_time or None,
+        phone=req.phone or None,
+        status=req.status,
+        admin_id=req.admin_id,
+        admin_note=req.admin_note,
+        decided_at=req.decided_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# App & middleware
+# ---------------------------------------------------------------------------
 
 app = FastAPI(title="Imobiliaria API")
 
-# Allow Vite dev server origin and localhost
+uploads_dir = os.path.join(os.path.dirname(__file__), "uploads")
+if not os.path.exists(uploads_dir):
+    os.makedirs(uploads_dir, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_dir), name="uploads")
+
 origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5175",
+    "http://localhost:5176",
+    "http://127.0.0.1:5176",
+    "http://localhost:5177",
+    "http://127.0.0.1:5177",
+    "http://localhost:5178",
+    "http://127.0.0.1:5178",
+    "http://localhost:5179",
+    "http://127.0.0.1:5179",
+    "http://localhost:5180",
+    "http://127.0.0.1:5180",
     "http://localhost:3000",
-    "*"
 ]
 
 app.add_middleware(
@@ -35,6 +186,10 @@ app.add_middleware(
 )
 
 
+# ---------------------------------------------------------------------------
+# Pydantic Schemas
+# ---------------------------------------------------------------------------
+
 class LoginRequest(BaseModel):
     role: str
 
@@ -44,6 +199,25 @@ class RegisterRequest(BaseModel):
     email: str
     password: str
     role: str
+    phone: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        return validate_password_policy(v)
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        pattern = r"^[\w.+-]+@[\w-]+\.[\w.]+$"
+        if not re.match(pattern, v):
+            raise ValueError("Email inválido")
+        return v.lower().strip()
+
+
+class EmailVerifyRequest(BaseModel):
+    email: str
+    code: str
 
 
 class TokenLoginRequest(BaseModel):
@@ -72,104 +246,727 @@ class PropertyCreate(BaseModel):
     caracteristicas: Optional[List[str]] = []
 
 
+class PropertyUpdate(BaseModel):
+    """All-optional schema for PUT /properties/{id}."""
+    titulo: Optional[str] = None
+    descricao: Optional[str] = None
+    tipo: Optional[str] = None
+    preco: Optional[float] = None
+    localizacao: Optional[str] = None
+    cidade: Optional[str] = None
+    tipologia: Optional[str] = None
+    area: Optional[float] = None
+    imagem: Optional[str] = None
+    galeria: Optional[List[str]] = None
+    quartos: Optional[int] = None
+    casasBanho: Optional[int] = None
+    garagem: Optional[bool] = None
+    piscina: Optional[bool] = None
+    jardim: Optional[bool] = None
+    anoConstructao: Optional[int] = None
+    certificadoEnergetico: Optional[str] = None
+    caracteristicas: Optional[List[str]] = None
+
+
+class VisitRequestCreate(BaseModel):
+    preferred_date: Optional[str] = None
+    preferred_time: Optional[str] = None
+    phone: Optional[str] = None
+
+    @field_validator("preferred_date")
+    @classmethod
+    def check_date(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return validate_date_string(v)
+        return v
+
+    @field_validator("preferred_time")
+    @classmethod
+    def check_time(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return validate_time_string(v)
+        return v
+
+
+class VisitRequestRead(BaseModel):
+    id: str
+    property_id: str
+    property_title: str
+    user_id: str
+    user_name: str
+    requested_at: str
+    preferred_date: Optional[str] = None
+    preferred_time: Optional[str] = None
+    phone: Optional[str] = None
+    status: Optional[str] = "pending"
+    admin_id: Optional[str] = None
+    admin_note: Optional[str] = None
+    decided_at: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class VisitRequestAction(BaseModel):
+    status: str
+    admin_note: Optional[str] = None
+
+
+class VisitRequestUpdate(BaseModel):
+    preferred_date: Optional[str] = None
+    preferred_time: Optional[str] = None
+
+    @field_validator("preferred_date")
+    @classmethod
+    def check_date(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return validate_date_string(v)
+        return v
+
+    @field_validator("preferred_time")
+    @classmethod
+    def check_time(cls, v: Optional[str]) -> Optional[str]:
+        if v:
+            return validate_time_string(v)
+        return v
+
+
+class ProfileUpdate(BaseModel):
+    nome: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+
+
+class ChatMessageCreate(BaseModel):
+    receiver_id: str
+    property_id: Optional[str] = None
+    message: str
+
+
+class ChatMessageRead(BaseModel):
+    id: str
+    sender_id: str
+    sender_name: str
+    receiver_id: str
+    receiver_name: str
+    property_id: Optional[str] = None
+    message: str
+    created_at: str
+    read: bool
+
+    model_config = {"from_attributes": True}
+
+
+class ReviewCreate(BaseModel):
+    rating: int
+    comment: Optional[str] = None
+
+    @field_validator("rating")
+    @classmethod
+    def validate_rating(cls, v: int) -> int:
+        if v < 1 or v > 5:
+            raise ValueError("A avaliação deve ser entre 1 e 5")
+        return v
+
+
+class ReviewRead(BaseModel):
+    id: str
+    property_id: str
+    user_id: str
+    user_name: str
+    rating: int
+    comment: Optional[str] = None
+    created_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        return validate_password_policy(v)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_password(cls, v: str) -> str:
+        return validate_password_policy(v)
+
+
+class AdminUserUpdate(BaseModel):
+    """For PATCH /admin/users/{id} — admin can change role or is_active."""
+    role: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class NotificationRead(BaseModel):
+    id: str
+    user_id: str
+    title: str
+    message: str
+    type: str
+    read: bool
+    created_at: str
+    link: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+# ---------------------------------------------------------------------------
+# Mailtrap helpers
+# ---------------------------------------------------------------------------
+
+def send_verification_email(to_email: str, code: str, user_name: str) -> bool:
+    """Send a 6-digit verification code via Mailtrap."""
+    try:
+        mail = mt.Mail(
+            sender=mt.Address(email=MAILTRAP_SENDER_EMAIL, name=MAILTRAP_SENDER_NAME),
+            to=[mt.Address(email=to_email)],
+            subject="ImovelTop — Código de Verificação",
+            text=(
+                f"Olá {user_name},\n\n"
+                f"O seu código de verificação é: {code}\n\n"
+                f"Este código expira em 15 minutos.\n\n"
+                f"Se não solicitou esta conta, ignore este email.\n\n"
+                f"— Equipa ImovelTop"
+            ),
+            category="Email Verification",
+        )
+        client = mt.MailtrapClient(token=MAILTRAP_TOKEN)
+        response = client.send(mail)
+        logger.info(f"Verification email sent to {to_email}: {response}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send verification email to {to_email}: {e}")
+        return False
+
+
+def send_password_reset_email(to_email: str, token: str, user_name: str) -> bool:
+    """Send a password-reset link via Mailtrap."""
+    reset_link = f"http://localhost:5179/reset-password?token={token}"
+    try:
+        mail = mt.Mail(
+            sender=mt.Address(email=MAILTRAP_SENDER_EMAIL, name=MAILTRAP_SENDER_NAME),
+            to=[mt.Address(email=to_email)],
+            subject="ImovelTop — Redefinir Senha",
+            text=(
+                f"Olá {user_name},\n\n"
+                f"Recebemos um pedido para redefinir a sua senha.\n\n"
+                f"O seu token de redefinição é: {token}\n\n"
+                f"Ou clique no link: {reset_link}\n\n"
+                f"Este token expira em 1 hora.\n\n"
+                f"Se não solicitou esta alteração, ignore este email.\n\n"
+                f"— Equipa ImovelTop"
+            ),
+            category="Password Reset",
+        )
+        client = mt.MailtrapClient(token=MAILTRAP_TOKEN)
+        response = client.send(mail)
+        logger.info(f"Password reset email sent to {to_email}: {response}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send password reset email to {to_email}: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Upload validation
+# ---------------------------------------------------------------------------
+
+def validate_upload(file: UploadFile) -> None:
+    """Raise HTTPException if file type or size is invalid."""
+    if file.content_type and file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Tipo de ficheiro não permitido: {file.content_type}. Use JPEG, PNG, WebP ou GIF.",
+        )
+    file.file.seek(0, 2)
+    size = file.file.tell()
+    file.file.seek(0)
+    if size > MAX_UPLOAD_SIZE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Ficheiro demasiado grande ({size // 1024 // 1024}MB). Máximo: {MAX_UPLOAD_SIZE_MB}MB.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+
 @app.on_event("startup")
 def on_startup():
-    # create tables and apply a simple schema-fix for the new `hashed_password` column
+    logger.info("Starting up — creating tables and seeding data…")
     create_db_and_tables()
 
-    # if the `user` table exists but lacks the `hashed_password` column, add it (sqlite)
+    # Schema migrations (sqlite ALTER TABLE for columns added after initial release)
     try:
-        from sqlalchemy import text
         with engine.connect() as conn:
-            cols = conn.execute(text("PRAGMA table_info('user')")).fetchall()
-            col_names = [c[1] for c in cols]
-            if 'hashed_password' not in col_names:
+            # User table migrations
+            cols = [c[1] for c in conn.execute(text("PRAGMA table_info('user')")).fetchall()]
+            if "hashed_password" not in cols:
                 conn.execute(text("ALTER TABLE user ADD COLUMN hashed_password TEXT"))
-    except Exception:
-        # non-blocking — migrations should be handled properly in production
-        pass
+            if "phone" not in cols:
+                conn.execute(text("ALTER TABLE user ADD COLUMN phone TEXT"))
+            if "email_verified" not in cols:
+                conn.execute(text("ALTER TABLE user ADD COLUMN email_verified INTEGER DEFAULT 1"))
+            if "is_active" not in cols:
+                conn.execute(text("ALTER TABLE user ADD COLUMN is_active INTEGER DEFAULT 1"))
+
+            # VisitRequest table migrations
+            vr_cols = [c[1] for c in conn.execute(text("PRAGMA table_info('visitrequest')")).fetchall()]
+            for col, coltype in [
+                ("preferred_date", "TEXT"),
+                ("preferred_time", "TEXT"),
+                ("phone", "TEXT"),
+                ("admin_id", "TEXT"),
+                ("admin_note", "TEXT"),
+                ("decided_at", "TEXT"),
+            ]:
+                if col not in vr_cols:
+                    conn.execute(text(f"ALTER TABLE visitrequest ADD COLUMN {col} {coltype}"))
+            if "status" not in vr_cols:
+                conn.execute(text("ALTER TABLE visitrequest ADD COLUMN status TEXT DEFAULT 'pending'"))
+
+            # Property table migrations
+            prop_cols = [c[1] for c in conn.execute(text("PRAGMA table_info('property')")).fetchall()]
+            if "deleted" not in prop_cols:
+                conn.execute(text("ALTER TABLE property ADD COLUMN deleted INTEGER DEFAULT 0"))
+            if "deleted_at" not in prop_cols:
+                conn.execute(text("ALTER TABLE property ADD COLUMN deleted_at TEXT"))
+
+            conn.commit()
+    except Exception as e:
+        logger.warning(f"Schema migration warning: {e}")
 
     with Session(engine) as session:
         seed(session)
+    logger.info("Startup complete.")
 
+
+# ---------------------------------------------------------------------------
+# Health check
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "timestamp": datetime.utcnow().isoformat()}
+
+
+# =====================================================================
+# AUTH ENDPOINTS
+# =====================================================================
 
 @app.post("/auth/login")
 def login(req: LoginRequest):
+    """Demo-only quick login by role."""
     with Session(engine) as session:
         user = session.exec(select(User).where(User.role == req.role)).first()
         if not user:
             raise HTTPException(status_code=400, detail="User with that role not found")
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Conta desactivada. Contacte o suporte.")
         token = create_access_token({"sub": user.id, "role": user.role})
+        logger.info(f"Demo login: {user.email} as {user.role}")
         return {"access_token": token, "token_type": "bearer", "user": user_to_dict(user)}
 
 
 @app.post("/auth/token")
-def token_login(payload: TokenLoginRequest):
-    """Login using email + password (returns JWT)."""
+def token_login(payload: TokenLoginRequest, request: Request):
+    """Login using email + password (returns JWT). Rate limited."""
+    check_rate_limit(f"login:{request.client.host}", max_requests=10, window=60)
     with Session(engine) as session:
         user = session.exec(select(User).where(User.email == payload.email)).first()
         if not user or not user.hashed_password:
             raise HTTPException(status_code=400, detail="Incorrect email or password")
-        from .security import verify_password
         if not verify_password(payload.password, user.hashed_password):
             raise HTTPException(status_code=400, detail="Incorrect email or password")
+        if not user.is_active:
+            raise HTTPException(status_code=403, detail="Conta desactivada. Contacte o suporte.")
+        if not user.email_verified:
+            raise HTTPException(status_code=403, detail="Email não verificado. Verifique o código enviado ao seu email.")
         token = create_access_token({"sub": user.id, "role": user.role})
+        logger.info(f"Login: {user.email}")
         return {"access_token": token, "token_type": "bearer", "user": user_to_dict(user)}
 
 
 @app.post("/auth/register")
-def register(req: RegisterRequest):
-    """Create a new user (role must be 'vendedor' or 'cliente'). Returns JWT + user."""
+def register(req: RegisterRequest, request: Request):
+    """Create a new user. Sends verification email. Rate limited."""
+    check_rate_limit(f"register:{request.client.host}", max_requests=5, window=300)
     if req.role not in ("vendedor", "cliente"):
         raise HTTPException(status_code=400, detail="Invalid role")
     with Session(engine) as session:
         exists = session.exec(select(User).where(User.email == req.email)).first()
         if exists:
+            if not exists.email_verified:
+                code = f"{random.randint(0, 999999):06d}"
+                verification = EmailVerification(
+                    id=str(uuid4()),
+                    user_id=exists.id,
+                    code=code,
+                    email=exists.email,
+                    created_at=datetime.utcnow().isoformat(),
+                )
+                session.add(verification)
+                session.commit()
+                send_verification_email(exists.email, code, exists.nome)
+                logger.info(f"Re-sent verification to unverified user: {exists.email}")
+                return {"message": "verification_required", "email": exists.email}
             raise HTTPException(status_code=400, detail="Email already registered")
-        from .security import get_password_hash
+
         new_user = User(
             id=str(uuid4()),
             nome=req.nome,
             email=req.email,
             role=req.role,
-            hashed_password=get_password_hash(req.password)
+            phone=req.phone or None,
+            hashed_password=get_password_hash(req.password),
+            email_verified=False,
         )
         session.add(new_user)
+        session.flush()
+
+        code = f"{random.randint(0, 999999):06d}"
+        verification = EmailVerification(
+            id=str(uuid4()),
+            user_id=new_user.id,
+            code=code,
+            email=new_user.email,
+            created_at=datetime.utcnow().isoformat(),
+        )
+        session.add(verification)
         session.commit()
-        session.refresh(new_user)
-        token = create_access_token({"sub": new_user.id, "role": new_user.role})
-        return {"access_token": token, "token_type": "bearer", "user": user_to_dict(new_user)}
+        send_verification_email(new_user.email, code, new_user.nome)
+        logger.info(f"New registration (pending verification): {new_user.email} as {new_user.role}")
+        return {"message": "verification_required", "email": new_user.email}
+
+
+@app.post("/auth/verify-email")
+def verify_email(payload: EmailVerifyRequest, request: Request):
+    """Verify the 6-digit code. Rate limited."""
+    check_rate_limit(f"verify:{request.client.host}", max_requests=10, window=60)
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == payload.email)).first()
+        if not user:
+            raise HTTPException(status_code=400, detail="Email não encontrado")
+
+        verification = session.exec(
+            select(EmailVerification).where(
+                EmailVerification.user_id == user.id,
+                EmailVerification.verified == False,
+            ).order_by(EmailVerification.created_at.desc())
+        ).first()
+
+        if not verification:
+            raise HTTPException(status_code=400, detail="Nenhum código de verificação pendente")
+
+        created = datetime.fromisoformat(verification.created_at)
+        if (datetime.utcnow() - created).total_seconds() > 900:
+            raise HTTPException(status_code=400, detail="Código expirado. Solicite um novo código.")
+
+        if verification.attempts >= 5:
+            raise HTTPException(status_code=400, detail="Demasiadas tentativas. Solicite um novo código.")
+
+        if verification.code != payload.code.strip():
+            verification.attempts += 1
+            session.add(verification)
+            session.commit()
+            remaining = 5 - verification.attempts
+            raise HTTPException(status_code=400, detail=f"Código inválido. {remaining} tentativas restantes.")
+
+        verification.verified = True
+        session.add(verification)
+        user.email_verified = True
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+        token = create_access_token({"sub": user.id, "role": user.role})
+        logger.info(f"Email verified: {user.email}")
+        return {"access_token": token, "token_type": "bearer", "user": user_to_dict(user)}
+
+
+@app.post("/auth/resend-code")
+def resend_verification_code(payload: PasswordResetRequest, request: Request):
+    """Resend verification code. Rate limited."""
+    check_rate_limit(f"resend:{request.client.host}", max_requests=3, window=120)
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == payload.email)).first()
+        if not user or user.email_verified:
+            return {"message": "Se o email existir e não estiver verificado, um novo código será enviado."}
+
+        code = f"{random.randint(0, 999999):06d}"
+        verification = EmailVerification(
+            id=str(uuid4()),
+            user_id=user.id,
+            code=code,
+            email=user.email,
+            created_at=datetime.utcnow().isoformat(),
+        )
+        session.add(verification)
+        session.commit()
+        send_verification_email(user.email, code, user.nome)
+        logger.info(f"Resent verification code to: {user.email}")
+        return {"message": "Novo código enviado."}
 
 
 @app.get("/auth/me")
 def me(current_user: User = Depends(get_current_user)):
-    """Return the current user from the Bearer token (useful for frontend auto-login)."""
     return user_to_dict(current_user)
 
 
-@app.get("/properties", response_model=List[Property])
-def list_properties(tipo: Optional[str] = None, cidade: Optional[str] = None, preco_max: Optional[float] = None, tipologia: Optional[str] = None):
+@app.patch("/auth/profile")
+def update_profile(payload: ProfileUpdate, current_user: User = Depends(get_current_user)):
+    """Update the current user's profile fields."""
     with Session(engine) as session:
-        q = select(Property)
+        user = session.get(User, current_user.id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        if payload.nome is not None:
+            user.nome = payload.nome
+        if payload.email is not None:
+            existing = session.exec(select(User).where(User.email == payload.email)).first()
+            if existing and existing.id != user.id:
+                raise HTTPException(status_code=400, detail="Email already in use")
+            user.email = payload.email
+        if payload.phone is not None:
+            user.phone = payload.phone
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        return user_to_dict(user)
+
+
+@app.post("/auth/change-password")
+def change_password(payload: PasswordChangeRequest, current_user: User = Depends(get_current_user)):
+    """Change password for the authenticated user."""
+    with Session(engine) as session:
+        user = session.get(User, current_user.id)
+        if not user or not user.hashed_password:
+            raise HTTPException(status_code=400, detail="Conta sem senha definida")
+        if not verify_password(payload.current_password, user.hashed_password):
+            raise HTTPException(status_code=400, detail="Senha actual incorrecta")
+        user.hashed_password = get_password_hash(payload.new_password)
+        session.add(user)
+        session.commit()
+        logger.info(f"Password changed: {user.email}")
+        return {"message": "Senha alterada com sucesso"}
+
+
+@app.delete("/auth/account", status_code=200)
+def delete_account(current_user: User = Depends(get_current_user)):
+    """Delete own account (RGPD right to be forgotten). Anonymises related data."""
+    with Session(engine) as session:
+        user = session.get(User, current_user.id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Soft-delete user's properties
+        my_props = session.exec(select(Property).where(Property.vendedorId == user.id)).all()
+        for p in my_props:
+            p.deleted = True
+            p.deleted_at = datetime.utcnow().isoformat()
+            session.add(p)
+
+        # Delete favorites, notifications, visit requests
+        for fav in session.exec(select(Favorite).where(Favorite.user_id == user.id)).all():
+            session.delete(fav)
+        for notif in session.exec(select(Notification).where(Notification.user_id == user.id)).all():
+            session.delete(notif)
+        for vr in session.exec(select(VisitRequest).where(VisitRequest.user_id == user.id)).all():
+            session.delete(vr)
+
+        # Anonymise reviews
+        for rev in session.exec(select(Review).where(Review.user_id == user.id)).all():
+            rev.user_name = "Utilizador removido"
+            rev.user_id = "deleted"
+            session.add(rev)
+
+        # Anonymise chat messages
+        for msg in session.exec(select(ChatMessage).where(
+            (ChatMessage.sender_id == user.id) | (ChatMessage.receiver_id == user.id)
+        )).all():
+            session.delete(msg)
+
+        # Delete verification / reset tokens
+        for v in session.exec(select(EmailVerification).where(EmailVerification.user_id == user.id)).all():
+            session.delete(v)
+        for rt in session.exec(select(PasswordResetToken).where(PasswordResetToken.user_id == user.id)).all():
+            session.delete(rt)
+
+        # Delete the user
+        session.delete(user)
+        session.commit()
+        logger.info(f"Account deleted (RGPD): {user.email}")
+        return {"message": "Conta eliminada com sucesso. Os seus dados foram removidos."}
+
+
+# =====================================================================
+# PASSWORD RESET
+# =====================================================================
+
+@app.post("/auth/forgot-password")
+def forgot_password(payload: PasswordResetRequest, request: Request):
+    """Generate a reset token and send it via Mailtrap."""
+    check_rate_limit(f"forgot:{request.client.host}", max_requests=3, window=300)
+    with Session(engine) as session:
+        user = session.exec(select(User).where(User.email == payload.email)).first()
+        if not user:
+            return {"message": "Se o email existir, receberá instruções para redefinir a senha."}
+        token_str = uuid4().hex
+        reset = PasswordResetToken(
+            id=str(uuid4()),
+            user_id=user.id,
+            token=token_str,
+            created_at=datetime.utcnow().isoformat(),
+        )
+        session.add(reset)
+        session.commit()
+        # Send via Mailtrap
+        send_password_reset_email(user.email, token_str, user.nome)
+        return {"message": "Se o email existir, receberá instruções para redefinir a senha."}
+
+
+@app.post("/auth/reset-password")
+def reset_password(payload: PasswordResetConfirm):
+    """Reset password using token."""
+    with Session(engine) as session:
+        reset = session.exec(
+            select(PasswordResetToken).where(
+                PasswordResetToken.token == payload.token,
+                PasswordResetToken.used == False,
+            )
+        ).first()
+        if not reset:
+            raise HTTPException(status_code=400, detail="Token inválido ou expirado")
+        created = datetime.fromisoformat(reset.created_at)
+        if (datetime.utcnow() - created).total_seconds() > 3600:
+            raise HTTPException(status_code=400, detail="Token expirado")
+        user = session.get(User, reset.user_id)
+        if not user:
+            raise HTTPException(status_code=400, detail="Utilizador não encontrado")
+        user.hashed_password = get_password_hash(payload.new_password)
+        reset.used = True
+        session.add(user)
+        session.add(reset)
+        session.commit()
+        return {"message": "Senha redefinida com sucesso"}
+
+
+# =====================================================================
+# PROPERTIES
+# =====================================================================
+
+@app.get("/properties", response_model=List[Property])
+def list_properties(
+    tipo: Optional[str] = None,
+    cidade: Optional[str] = None,
+    preco_max: Optional[float] = None,
+    preco_min: Optional[float] = None,
+    tipologia: Optional[str] = None,
+    quartos_min: Optional[int] = None,
+    quartos_max: Optional[int] = None,
+    area_min: Optional[float] = None,
+    area_max: Optional[float] = None,
+    search: Optional[str] = None,
+    garagem: Optional[bool] = None,
+    piscina: Optional[bool] = None,
+    jardim: Optional[bool] = None,
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+):
+    with Session(engine) as session:
+        q = select(Property).where(Property.deleted == False)
         if tipo and tipo != "todos":
             q = q.where(Property.tipo == tipo)
         if cidade:
             q = q.where(Property.cidade.ilike(f"%{cidade}%"))
         if preco_max is not None:
             q = q.where(Property.preco <= preco_max)
+        if preco_min is not None:
+            q = q.where(Property.preco >= preco_min)
         if tipologia and tipologia != "todos":
             q = q.where(Property.tipologia == tipologia)
-        results = session.exec(q).all()
-        return results
+        if quartos_min is not None:
+            q = q.where(Property.quartos >= quartos_min)
+        if quartos_max is not None:
+            q = q.where(Property.quartos <= quartos_max)
+        if area_min is not None:
+            q = q.where(Property.area >= area_min)
+        if area_max is not None:
+            q = q.where(Property.area <= area_max)
+        if garagem is not None:
+            q = q.where(Property.garagem == garagem)
+        if piscina is not None:
+            q = q.where(Property.piscina == piscina)
+        if jardim is not None:
+            q = q.where(Property.jardim == jardim)
+        if search:
+            q = q.where(
+                Property.titulo.ilike(f"%{search}%")
+                | Property.descricao.ilike(f"%{search}%")
+                | Property.localizacao.ilike(f"%{search}%")
+                | Property.cidade.ilike(f"%{search}%")
+            )
+        if page and per_page:
+            q = q.offset((page - 1) * per_page).limit(per_page)
+        return session.exec(q).all()
+
+
+@app.get("/properties/count")
+def count_properties(
+    tipo: Optional[str] = None,
+    cidade: Optional[str] = None,
+    preco_max: Optional[float] = None,
+    preco_min: Optional[float] = None,
+    tipologia: Optional[str] = None,
+    quartos_min: Optional[int] = None,
+    area_min: Optional[float] = None,
+    area_max: Optional[float] = None,
+    search: Optional[str] = None,
+):
+    with Session(engine) as session:
+        q = select(func.count(Property.id)).where(Property.deleted == False)
+        if tipo and tipo != "todos":
+            q = q.where(Property.tipo == tipo)
+        if cidade:
+            q = q.where(Property.cidade.ilike(f"%{cidade}%"))
+        if preco_max is not None:
+            q = q.where(Property.preco <= preco_max)
+        if preco_min is not None:
+            q = q.where(Property.preco >= preco_min)
+        if tipologia and tipologia != "todos":
+            q = q.where(Property.tipologia == tipologia)
+        if search:
+            q = q.where(
+                Property.titulo.ilike(f"%{search}%")
+                | Property.descricao.ilike(f"%{search}%")
+                | Property.localizacao.ilike(f"%{search}%")
+                | Property.cidade.ilike(f"%{search}%")
+            )
+        count = session.exec(q).one()
+        return {"count": count}
 
 
 @app.get("/properties/{property_id}", response_model=Property)
 def get_property(property_id: str):
     with Session(engine) as session:
-        property_obj = session.get(Property, property_id)
-        if not property_obj:
+        prop = session.get(Property, property_id)
+        if not prop or prop.deleted:
             raise HTTPException(status_code=404, detail="Property not found")
-        return property_obj
+        return prop
 
 
 @app.post("/properties", response_model=Property, status_code=201)
@@ -198,7 +995,7 @@ def create_property(payload: PropertyCreate, current_user: User = Depends(requir
             jardim=payload.jardim,
             anoConstructao=payload.anoConstructao,
             certificadoEnergetico=payload.certificadoEnergetico,
-            caracteristicas=payload.caracteristicas or []
+            caracteristicas=payload.caracteristicas or [],
         )
         session.add(prop)
         session.commit()
@@ -206,12 +1003,841 @@ def create_property(payload: PropertyCreate, current_user: User = Depends(requir
         return prop
 
 
-@app.delete("/properties/{property_id}", status_code=204)
-def delete_property(property_id: str, current_user: User = Depends(require_roles(["admin"]))):
+@app.put("/properties/{property_id}", response_model=Property)
+def update_property(property_id: str, payload: PropertyUpdate, current_user: User = Depends(require_roles(["vendedor", "admin"]))):
+    """Update property. Vendor can only edit own; admin can edit any."""
+    with Session(engine) as session:
+        prop = session.get(Property, property_id)
+        if not prop or prop.deleted:
+            raise HTTPException(status_code=404, detail="Property not found")
+        if current_user.role == "vendedor" and prop.vendedorId != current_user.id:
+            raise HTTPException(status_code=403, detail="Só pode editar os seus próprios imóveis")
+        update_data = payload.model_dump(exclude_unset=True)
+        for field, value in update_data.items():
+            setattr(prop, field, value)
+        session.add(prop)
+        session.commit()
+        session.refresh(prop)
+        return prop
+
+
+@app.post("/properties/upload", response_model=Property, status_code=201)
+async def upload_property(
+    titulo: str = Form(...),
+    descricao: str = Form(...),
+    tipo: str = Form(...),
+    preco: float = Form(...),
+    localizacao: str = Form(...),
+    cidade: str = Form(...),
+    tipologia: str = Form(...),
+    area: float = Form(...),
+    quartos: int = Form(...),
+    casasBanho: int = Form(...),
+    garagem: bool = Form(False),
+    piscina: bool = Form(False),
+    jardim: bool = Form(False),
+    anoConstructao: int = Form(...),
+    certificadoEnergetico: str = Form(...),
+    caracteristicas: str = Form(""),
+    imagem_url: Optional[str] = Form(None),
+    galeria_urls: Optional[str] = Form(None),
+    imagem_file: UploadFile = File(None),
+    galeria_files: List[UploadFile] = File([]),
+    current_user: User = Depends(require_roles(["vendedor", "admin"])),
+):
+    try:
+        caracteristicas_list = json.loads(caracteristicas) if caracteristicas else []
+    except Exception:
+        caracteristicas_list = [c.strip() for c in (caracteristicas or "").split(",") if c.strip()]
+
+    saved_urls: List[str] = []
+
+    # main image
+    main_image_url = None
+    if imagem_file:
+        main_image_url = save_upload_file(imagem_file, uploads_dir)
+    elif imagem_url:
+        main_image_url = imagem_url
+
+    # gallery files — validation errors now surface properly
+    gallery_errors: List[str] = []
+    for f in galeria_files or []:
+        if f and f.filename:
+            try:
+                saved_urls.append(save_upload_file(f, uploads_dir))
+            except HTTPException as e:
+                gallery_errors.append(f"{f.filename}: {e.detail}")
+
+    if gallery_errors:
+        raise HTTPException(status_code=400, detail=f"Erros na galeria: {'; '.join(gallery_errors)}")
+
+    # gallery URLs
+    if galeria_urls:
+        try:
+            parsed = json.loads(galeria_urls)
+            if isinstance(parsed, list):
+                saved_urls.extend(parsed)
+        except Exception:
+            saved_urls.extend([u.strip() for u in galeria_urls.split(",") if u.strip()])
+
+    gallery = list(saved_urls)
+    if main_image_url and main_image_url not in gallery:
+        gallery.insert(0, main_image_url)
+    if not gallery and main_image_url:
+        gallery = [main_image_url]
+    if not gallery:
+        gallery = ["/uploads/default.jpg"]
+
+    with Session(engine) as session:
+        new_id = str(uuid4())
+        prop = Property(
+            id=new_id,
+            titulo=titulo,
+            descricao=descricao,
+            tipo=tipo,
+            preco=preco,
+            localizacao=localizacao,
+            cidade=cidade,
+            tipologia=tipologia,
+            area=area,
+            imagem=main_image_url or (gallery[0] if gallery else ""),
+            galeria=gallery,
+            vendedorId=current_user.id,
+            vendedorNome=current_user.nome,
+            createdAt=date.today().isoformat(),
+            quartos=quartos,
+            casasBanho=casasBanho,
+            garagem=garagem,
+            piscina=piscina,
+            jardim=jardim,
+            anoConstructao=anoConstructao,
+            certificadoEnergetico=certificadoEnergetico,
+            caracteristicas=caracteristicas_list,
+        )
+        session.add(prop)
+        session.commit()
+        session.refresh(prop)
+        return prop
+
+
+@app.delete("/properties/{property_id}", status_code=200)
+def delete_property(
+    property_id: str,
+    current_user: User = Depends(require_roles(["vendedor", "admin"])),
+):
+    """Soft-delete a property. Vendor can delete own; admin can delete any."""
+    with Session(engine) as session:
+        prop = session.get(Property, property_id)
+        if not prop or prop.deleted:
+            raise HTTPException(status_code=404, detail="Property not found")
+        if current_user.role == "vendedor" and prop.vendedorId != current_user.id:
+            raise HTTPException(status_code=403, detail="Só pode apagar os seus próprios imóveis")
+        prop.deleted = True
+        prop.deleted_at = datetime.utcnow().isoformat()
+        session.add(prop)
+        session.commit()
+        return {"message": "Imóvel removido com sucesso"}
+
+
+@app.post("/properties/{property_id}/restore", status_code=200)
+def restore_property(property_id: str, current_user: User = Depends(require_roles(["admin"]))):
+    """Admin-only: restore a soft-deleted property."""
     with Session(engine) as session:
         prop = session.get(Property, property_id)
         if not prop:
             raise HTTPException(status_code=404, detail="Property not found")
-        session.delete(prop)
+        if not prop.deleted:
+            raise HTTPException(status_code=400, detail="Imóvel não está eliminado")
+        prop.deleted = False
+        prop.deleted_at = None
+        session.add(prop)
+        session.commit()
+        session.refresh(prop)
+        return prop
+
+
+# =====================================================================
+# VISIT REQUESTS
+# =====================================================================
+
+@app.post("/properties/{property_id}/visit-requests", response_model=VisitRequestRead, status_code=201)
+def request_visit(property_id: str, payload: VisitRequestCreate, current_user: User = Depends(require_roles(["cliente"]))):
+    with Session(engine) as session:
+        prop = session.get(Property, property_id)
+        if not prop or prop.deleted:
+            raise HTTPException(status_code=404, detail="Property not found")
+        preferred_date = payload.preferred_date or None
+        preferred_time = payload.preferred_time or None
+        phone_val = payload.phone or None
+
+        # Schedule conflict validation
+        if preferred_date and preferred_time:
+            conflict = session.exec(
+                select(VisitRequest).where(
+                    VisitRequest.property_id == property_id,
+                    VisitRequest.preferred_date == preferred_date,
+                    VisitRequest.preferred_time == preferred_time,
+                    VisitRequest.status.in_(["pending", "approved"]),
+                )
+            ).first()
+            if conflict:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Já existe uma visita agendada para {preferred_date} às {preferred_time}. Escolha outro horário.",
+                )
+
+        new_req = VisitRequest(
+            id=str(uuid4()),
+            property_id=property_id,
+            user_id=current_user.id,
+            requested_at=date.today().isoformat(),
+            preferred_date=preferred_date,
+            preferred_time=preferred_time,
+            phone=phone_val,
+            status="pending",
+        )
+        session.add(new_req)
+
+        # Notify admins
+        admins = session.exec(select(User).where(User.role == "admin")).all()
+        for admin in admins:
+            session.add(Notification(
+                id=str(uuid4()),
+                user_id=admin.id,
+                title="Nova visita agendada",
+                message=f"{current_user.nome} agendou visita ao imóvel '{prop.titulo}'",
+                type="info",
+                created_at=datetime.utcnow().isoformat(),
+            ))
+
+        # Notify vendor
+        if prop.vendedorId != current_user.id:
+            session.add(Notification(
+                id=str(uuid4()),
+                user_id=prop.vendedorId,
+                title="Nova visita ao seu imóvel",
+                message=f"{current_user.nome} agendou visita ao imóvel '{prop.titulo}'",
+                type="info",
+                created_at=datetime.utcnow().isoformat(),
+            ))
+
+        session.commit()
+        session.refresh(new_req)
+        return build_visit_request_read(new_req, prop, current_user)
+
+
+@app.get("/visit-requests", response_model=List[VisitRequestRead])
+def list_visit_requests(
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    current_user: User = Depends(require_roles(["admin"])),
+):
+    """List all visit requests (admin). Supports pagination."""
+    with Session(engine) as session:
+        q = select(VisitRequest)
+        if page and per_page:
+            q = q.offset((page - 1) * per_page).limit(per_page)
+        results = session.exec(q).all()
+        out: List[VisitRequestRead] = []
+        for req in results:
+            prop = session.get(Property, req.property_id)
+            user = session.get(User, req.user_id)
+            out.append(build_visit_request_read(req, prop, user))
+        return out
+
+
+@app.patch("/visit-requests/{request_id}")
+def update_visit_request(request_id: str, action: VisitRequestAction, current_user: User = Depends(require_roles(["admin"]))):
+    with Session(engine) as session:
+        req = session.get(VisitRequest, request_id)
+        if not req:
+            raise HTTPException(status_code=404, detail="Visit request not found")
+        if action.status not in ("approved", "rejected", "concluded"):
+            raise HTTPException(status_code=400, detail="Invalid status")
+        req.status = action.status
+        req.admin_note = action.admin_note
+        req.admin_id = current_user.id
+        req.decided_at = date.today().isoformat()
+        session.add(req)
+
+        prop = session.get(Property, req.property_id)
+        status_label = {"approved": "aprovada", "rejected": "rejeitada", "concluded": "concluída"}.get(action.status, action.status)
+        session.add(Notification(
+            id=str(uuid4()),
+            user_id=req.user_id,
+            title=f"Visita {status_label}",
+            message=f"A sua visita ao imóvel '{prop.titulo if prop else ''}' foi {status_label}.",
+            type=f"visit_{action.status}",
+            created_at=datetime.utcnow().isoformat(),
+        ))
+
+        session.commit()
+        session.refresh(req)
+        user = session.get(User, req.user_id)
+        return build_visit_request_read(req, prop, user)
+
+
+@app.get("/users")
+def list_users(current_user: User = Depends(require_roles(["admin"]))):
+    with Session(engine) as session:
+        users = session.exec(select(User)).all()
+        return [user_to_dict(u) for u in users]
+
+
+# ---- Client-facing visit request endpoints ----
+
+@app.get("/my/visit-requests", response_model=List[VisitRequestRead])
+def my_visit_requests(current_user: User = Depends(require_roles(["cliente"]))):
+    with Session(engine) as session:
+        q = select(VisitRequest).where(VisitRequest.user_id == current_user.id)
+        results = session.exec(q).all()
+        out: List[VisitRequestRead] = []
+        for req in results:
+            prop = session.get(Property, req.property_id)
+            out.append(build_visit_request_read(req, prop, current_user))
+        return out
+
+
+@app.delete("/my/visit-requests/{request_id}", status_code=204)
+def cancel_my_visit_request(request_id: str, current_user: User = Depends(require_roles(["cliente"]))):
+    with Session(engine) as session:
+        req = session.get(VisitRequest, request_id)
+        if not req:
+            raise HTTPException(status_code=404, detail="Visit request not found")
+        if req.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not your request")
+        if req.status != "pending":
+            raise HTTPException(status_code=400, detail="Only pending requests can be cancelled")
+        session.delete(req)
         session.commit()
         return
+
+
+@app.patch("/my/visit-requests/{request_id}")
+def update_my_visit_request(request_id: str, payload: VisitRequestUpdate, current_user: User = Depends(require_roles(["cliente"]))):
+    with Session(engine) as session:
+        req = session.get(VisitRequest, request_id)
+        if not req:
+            raise HTTPException(status_code=404, detail="Visit request not found")
+        if req.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not your request")
+        if req.status != "pending":
+            raise HTTPException(status_code=400, detail="Only pending requests can be edited")
+        new_date = payload.preferred_date if payload.preferred_date is not None else req.preferred_date
+        new_time = payload.preferred_time if payload.preferred_time is not None else req.preferred_time
+
+        # Conflict check on updated date/time
+        if new_date and new_time:
+            conflict = session.exec(
+                select(VisitRequest).where(
+                    VisitRequest.property_id == req.property_id,
+                    VisitRequest.preferred_date == new_date,
+                    VisitRequest.preferred_time == new_time,
+                    VisitRequest.status.in_(["pending", "approved"]),
+                    VisitRequest.id != req.id,
+                )
+            ).first()
+            if conflict:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Já existe uma visita agendada para {new_date} às {new_time}. Escolha outro horário.",
+                )
+
+        if payload.preferred_date is not None:
+            req.preferred_date = payload.preferred_date
+        if payload.preferred_time is not None:
+            req.preferred_time = payload.preferred_time
+        session.add(req)
+        session.commit()
+        session.refresh(req)
+        prop = session.get(Property, req.property_id)
+        return build_visit_request_read(req, prop, current_user)
+
+
+# =====================================================================
+# FAVORITES
+# =====================================================================
+
+@app.get("/my/favorites")
+def my_favorites(current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        favs = session.exec(select(Favorite).where(Favorite.user_id == current_user.id)).all()
+        property_ids = [f.property_id for f in favs]
+        if not property_ids:
+            return []
+        props = session.exec(select(Property).where(Property.id.in_(property_ids), Property.deleted == False)).all()
+        return [p.model_dump() for p in props]
+
+
+@app.post("/my/favorites/{property_id}", status_code=201)
+def add_favorite(property_id: str, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        existing = session.exec(
+            select(Favorite).where(Favorite.user_id == current_user.id, Favorite.property_id == property_id)
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Already favorited")
+        fav = Favorite(
+            id=str(uuid4()),
+            user_id=current_user.id,
+            property_id=property_id,
+            created_at=datetime.utcnow().isoformat(),
+        )
+        session.add(fav)
+        session.commit()
+        return {"id": fav.id, "property_id": fav.property_id}
+
+
+@app.delete("/my/favorites/{property_id}", status_code=204)
+def remove_favorite(property_id: str, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        fav = session.exec(
+            select(Favorite).where(Favorite.user_id == current_user.id, Favorite.property_id == property_id)
+        ).first()
+        if not fav:
+            raise HTTPException(status_code=404, detail="Not favorited")
+        session.delete(fav)
+        session.commit()
+        return
+
+
+# =====================================================================
+# NOTIFICATIONS (with pagination)
+# =====================================================================
+
+@app.get("/my/notifications")
+def my_notifications(
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+):
+    with Session(engine) as session:
+        q = select(Notification).where(Notification.user_id == current_user.id).order_by(Notification.created_at.desc())
+        if page and per_page:
+            q = q.offset((page - 1) * per_page).limit(per_page)
+        notifs = session.exec(q).all()
+        return [
+            NotificationRead(
+                id=n.id, user_id=n.user_id, title=n.title, message=n.message,
+                type=n.type, read=n.read, created_at=n.created_at, link=n.link,
+            )
+            for n in notifs
+        ]
+
+
+@app.patch("/my/notifications/{notification_id}/read")
+def mark_notification_read(notification_id: str, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        notif = session.get(Notification, notification_id)
+        if not notif or notif.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Not found")
+        notif.read = True
+        session.add(notif)
+        session.commit()
+        return {"ok": True}
+
+
+@app.patch("/my/notifications/read-all")
+def mark_all_notifications_read(current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        notifs = session.exec(
+            select(Notification).where(Notification.user_id == current_user.id, Notification.read == False)
+        ).all()
+        for n in notifs:
+            n.read = True
+            session.add(n)
+        session.commit()
+        return {"ok": True}
+
+
+# =====================================================================
+# CHAT (with pagination)
+# =====================================================================
+
+@app.get("/chat/conversations")
+def chat_conversations(current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        sent = session.exec(select(ChatMessage).where(ChatMessage.sender_id == current_user.id)).all()
+        received = session.exec(select(ChatMessage).where(ChatMessage.receiver_id == current_user.id)).all()
+        partner_ids = set()
+        for m in sent:
+            partner_ids.add(m.receiver_id)
+        for m in received:
+            partner_ids.add(m.sender_id)
+        conversations = []
+        for pid in partner_ids:
+            partner = session.get(User, pid)
+            if partner:
+                all_msgs = [m for m in sent + received if m.sender_id == pid or m.receiver_id == pid]
+                all_msgs.sort(key=lambda m: m.created_at, reverse=True)
+                last = all_msgs[0] if all_msgs else None
+                unread = len([m for m in received if m.sender_id == pid and not m.read])
+                conversations.append({
+                    "partner_id": pid,
+                    "partner_name": partner.nome,
+                    "partner_role": partner.role,
+                    "last_message": last.message if last else "",
+                    "last_message_at": last.created_at if last else "",
+                    "unread_count": unread,
+                })
+        conversations.sort(key=lambda c: c["last_message_at"], reverse=True)
+        return conversations
+
+
+@app.get("/chat/{partner_id}")
+def chat_messages(
+    partner_id: str,
+    page: Optional[int] = None,
+    per_page: Optional[int] = None,
+    current_user: User = Depends(get_current_user),
+):
+    with Session(engine) as session:
+        q = select(ChatMessage).where(
+            ((ChatMessage.sender_id == current_user.id) & (ChatMessage.receiver_id == partner_id))
+            | ((ChatMessage.sender_id == partner_id) & (ChatMessage.receiver_id == current_user.id))
+        ).order_by(ChatMessage.created_at)
+        if page and per_page:
+            q = q.offset((page - 1) * per_page).limit(per_page)
+        msgs = session.exec(q).all()
+
+        # mark received messages as read
+        for m in msgs:
+            if m.receiver_id == current_user.id and not m.read:
+                m.read = True
+                session.add(m)
+        session.commit()
+
+        result = []
+        for m in msgs:
+            sender = session.get(User, m.sender_id)
+            receiver = session.get(User, m.receiver_id)
+            result.append(ChatMessageRead(
+                id=m.id, sender_id=m.sender_id,
+                sender_name=sender.nome if sender else "",
+                receiver_id=m.receiver_id,
+                receiver_name=receiver.nome if receiver else "",
+                property_id=m.property_id,
+                message=m.message, created_at=m.created_at, read=m.read,
+            ))
+        return result
+
+
+@app.post("/chat/{partner_id}", status_code=201)
+def send_chat_message(partner_id: str, payload: ChatMessageCreate, current_user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        partner = session.get(User, partner_id)
+        if not partner:
+            raise HTTPException(status_code=404, detail="User not found")
+        msg = ChatMessage(
+            id=str(uuid4()),
+            sender_id=current_user.id,
+            receiver_id=partner_id,
+            property_id=payload.property_id,
+            message=payload.message,
+            created_at=datetime.utcnow().isoformat(),
+        )
+        session.add(msg)
+        session.add(Notification(
+            id=str(uuid4()),
+            user_id=partner_id,
+            title="Nova mensagem",
+            message=f"{current_user.nome}: {payload.message[:80]}",
+            type="chat",
+            created_at=datetime.utcnow().isoformat(),
+        ))
+        session.commit()
+        session.refresh(msg)
+        return ChatMessageRead(
+            id=msg.id, sender_id=msg.sender_id,
+            sender_name=current_user.nome,
+            receiver_id=msg.receiver_id,
+            receiver_name=partner.nome,
+            property_id=msg.property_id,
+            message=msg.message, created_at=msg.created_at, read=msg.read,
+        )
+
+
+# =====================================================================
+# REVIEWS
+# =====================================================================
+
+@app.get("/properties/{property_id}/reviews")
+def get_reviews(property_id: str):
+    with Session(engine) as session:
+        reviews = session.exec(select(Review).where(Review.property_id == property_id)).all()
+        reviews_sorted = sorted(reviews, key=lambda r: r.created_at, reverse=True)
+        return [
+            ReviewRead(
+                id=r.id, property_id=r.property_id, user_id=r.user_id,
+                user_name=r.user_name, rating=r.rating, comment=r.comment, created_at=r.created_at,
+            )
+            for r in reviews_sorted
+        ]
+
+
+@app.post("/properties/{property_id}/reviews", status_code=201)
+def create_review(property_id: str, payload: ReviewCreate, current_user: User = Depends(get_current_user)):
+    # rating already validated by pydantic field_validator
+    with Session(engine) as session:
+        prop = session.get(Property, property_id)
+        if not prop or prop.deleted:
+            raise HTTPException(status_code=404, detail="Property not found")
+        existing = session.exec(
+            select(Review).where(Review.property_id == property_id, Review.user_id == current_user.id)
+        ).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="Já avaliou este imóvel")
+        review = Review(
+            id=str(uuid4()),
+            property_id=property_id,
+            user_id=current_user.id,
+            user_name=current_user.nome,
+            rating=payload.rating,
+            comment=payload.comment,
+            created_at=datetime.utcnow().isoformat(),
+        )
+        session.add(review)
+        session.add(Notification(
+            id=str(uuid4()),
+            user_id=prop.vendedorId,
+            title="Nova avaliação",
+            message=f"{current_user.nome} avaliou o imóvel '{prop.titulo}' com {payload.rating} estrelas.",
+            type="review",
+            created_at=datetime.utcnow().isoformat(),
+        ))
+        session.commit()
+        return ReviewRead(
+            id=review.id, property_id=review.property_id, user_id=review.user_id,
+            user_name=review.user_name, rating=review.rating, comment=review.comment,
+            created_at=review.created_at,
+        )
+
+
+# =====================================================================
+# ADMIN
+# =====================================================================
+
+@app.get("/admin/stats")
+def admin_stats(current_user: User = Depends(require_roles(["admin"]))):
+    with Session(engine) as session:
+        total_props = session.exec(select(func.count(Property.id)).where(Property.deleted == False)).one()
+        props_venda = session.exec(
+            select(func.count(Property.id)).where(Property.tipo == "venda", Property.deleted == False)
+        ).one()
+        props_arrend = session.exec(
+            select(func.count(Property.id)).where(Property.tipo == "arrendamento", Property.deleted == False)
+        ).one()
+
+        total_users = session.exec(select(func.count(User.id))).one()
+        clientes = session.exec(select(func.count(User.id)).where(User.role == "cliente")).one()
+        vendedores = session.exec(select(func.count(User.id)).where(User.role == "vendedor")).one()
+
+        total_visits = session.exec(select(func.count(VisitRequest.id))).one()
+        pending_visits = session.exec(select(func.count(VisitRequest.id)).where(VisitRequest.status == "pending")).one()
+        approved_visits = session.exec(select(func.count(VisitRequest.id)).where(VisitRequest.status == "approved")).one()
+        rejected_visits = session.exec(select(func.count(VisitRequest.id)).where(VisitRequest.status == "rejected")).one()
+
+        total_reviews = session.exec(select(func.count(Review.id))).one()
+
+        # properties by city (COUNT + GROUP BY)
+        city_rows = session.exec(
+            select(Property.cidade, func.count(Property.id)).where(Property.deleted == False).group_by(Property.cidade)
+        ).all()
+        cities = {row[0]: row[1] for row in city_rows}
+
+        # properties by tipologia
+        tipo_rows = session.exec(
+            select(Property.tipologia, func.count(Property.id)).where(Property.deleted == False).group_by(Property.tipologia)
+        ).all()
+        tipologias = {row[0]: row[1] for row in tipo_rows}
+
+        return {
+            "properties": {"total": total_props, "venda": props_venda, "arrendamento": props_arrend},
+            "users": {"total": total_users, "clientes": clientes, "vendedores": vendedores},
+            "visits": {"total": total_visits, "pending": pending_visits, "approved": approved_visits, "rejected": rejected_visits},
+            "reviews": {"total": total_reviews},
+            "by_city": cities,
+            "by_tipologia": tipologias,
+        }
+
+
+@app.patch("/admin/users/{user_id}")
+def admin_update_user(user_id: str, payload: AdminUserUpdate, current_user: User = Depends(require_roles(["admin"]))):
+    """Admin can change a user's role or deactivate/reactivate them."""
+    with Session(engine) as session:
+        user = session.get(User, user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        if user.id == current_user.id:
+            raise HTTPException(status_code=400, detail="Não pode alterar a sua própria conta por esta via")
+        if payload.role is not None:
+            if payload.role not in ("cliente", "vendedor", "admin"):
+                raise HTTPException(status_code=400, detail="Role inválido")
+            user.role = payload.role
+        if payload.is_active is not None:
+            user.is_active = payload.is_active
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+        logger.info(f"Admin updated user {user.email}: role={user.role}, is_active={user.is_active}")
+        return user_to_dict(user)
+
+
+@app.get("/admin/deleted-properties")
+def admin_deleted_properties(current_user: User = Depends(require_roles(["admin"]))):
+    """List soft-deleted properties (admin only)."""
+    with Session(engine) as session:
+        props = session.exec(select(Property).where(Property.deleted == True)).all()
+        return [p.model_dump() for p in props]
+
+
+# =====================================================================
+# VENDOR ENDPOINTS
+# =====================================================================
+
+@app.get("/vendor/visit-requests", response_model=List[VisitRequestRead])
+def vendor_visit_requests(current_user: User = Depends(require_roles(["vendedor"]))):
+    """Return visit requests for vendor's properties."""
+    with Session(engine) as session:
+        my_props = session.exec(select(Property).where(Property.vendedorId == current_user.id)).all()
+        prop_ids = [p.id for p in my_props]
+        if not prop_ids:
+            return []
+        results = session.exec(select(VisitRequest).where(VisitRequest.property_id.in_(prop_ids))).all()
+        out: List[VisitRequestRead] = []
+        for req in results:
+            prop = session.get(Property, req.property_id)
+            user = session.get(User, req.user_id)
+            out.append(build_visit_request_read(req, prop, user))
+        return out
+
+
+@app.patch("/vendor/visit-requests/{request_id}")
+def vendor_update_visit(request_id: str, action: VisitRequestAction, current_user: User = Depends(require_roles(["vendedor"]))):
+    """Vendor can approve/reject/conclude visits on their own properties."""
+    with Session(engine) as session:
+        req = session.get(VisitRequest, request_id)
+        if not req:
+            raise HTTPException(status_code=404, detail="Visit request not found")
+        # verify ownership
+        prop = session.get(Property, req.property_id)
+        if not prop or prop.vendedorId != current_user.id:
+            raise HTTPException(status_code=403, detail="Esta visita não pertence aos seus imóveis")
+        if action.status not in ("approved", "rejected", "concluded"):
+            raise HTTPException(status_code=400, detail="Invalid status")
+
+        req.status = action.status
+        req.admin_note = action.admin_note
+        req.admin_id = current_user.id
+        req.decided_at = date.today().isoformat()
+        session.add(req)
+
+        status_label = {"approved": "aprovada", "rejected": "rejeitada", "concluded": "concluída"}.get(action.status, action.status)
+        session.add(Notification(
+            id=str(uuid4()),
+            user_id=req.user_id,
+            title=f"Visita {status_label}",
+            message=f"A sua visita ao imóvel '{prop.titulo}' foi {status_label} pelo vendedor.",
+            type=f"visit_{action.status}",
+            created_at=datetime.utcnow().isoformat(),
+        ))
+
+        session.commit()
+        session.refresh(req)
+        user = session.get(User, req.user_id)
+        return build_visit_request_read(req, prop, user)
+
+
+@app.get("/vendor/stats")
+def vendor_stats(current_user: User = Depends(require_roles(["vendedor"]))):
+    """Stats specific to the current vendor."""
+    with Session(engine) as session:
+        my_props = session.exec(
+            select(Property).where(Property.vendedorId == current_user.id, Property.deleted == False)
+        ).all()
+        prop_ids = [p.id for p in my_props]
+
+        total_props = len(my_props)
+        props_venda = sum(1 for p in my_props if p.tipo == "venda")
+        props_arrend = sum(1 for p in my_props if p.tipo == "arrendamento")
+
+        total_visits = 0
+        pending_visits = 0
+        approved_visits = 0
+        if prop_ids:
+            total_visits = session.exec(
+                select(func.count(VisitRequest.id)).where(VisitRequest.property_id.in_(prop_ids))
+            ).one()
+            pending_visits = session.exec(
+                select(func.count(VisitRequest.id)).where(
+                    VisitRequest.property_id.in_(prop_ids), VisitRequest.status == "pending"
+                )
+            ).one()
+            approved_visits = session.exec(
+                select(func.count(VisitRequest.id)).where(
+                    VisitRequest.property_id.in_(prop_ids), VisitRequest.status == "approved"
+                )
+            ).one()
+
+        total_reviews = 0
+        avg_rating = 0.0
+        if prop_ids:
+            total_reviews = session.exec(
+                select(func.count(Review.id)).where(Review.property_id.in_(prop_ids))
+            ).one()
+            avg_row = session.exec(
+                select(func.avg(Review.rating)).where(Review.property_id.in_(prop_ids))
+            ).one()
+            avg_rating = round(float(avg_row), 2) if avg_row else 0.0
+
+        total_favorites = 0
+        if prop_ids:
+            total_favorites = session.exec(
+                select(func.count(Favorite.id)).where(Favorite.property_id.in_(prop_ids))
+            ).one()
+
+        return {
+            "properties": {"total": total_props, "venda": props_venda, "arrendamento": props_arrend},
+            "visits": {"total": total_visits, "pending": pending_visits, "approved": approved_visits},
+            "reviews": {"total": total_reviews, "average_rating": avg_rating},
+            "favorites": total_favorites,
+        }
+
+
+# =====================================================================
+# ADMIN REPORT (using COUNT queries)
+# =====================================================================
+
+@app.get("/admin/report")
+def admin_report(current_user: User = Depends(require_roles(["admin"]))):
+    """Generate a monthly report summary."""
+    with Session(engine) as session:
+        today = date.today()
+        month_start = today.replace(day=1).isoformat()
+
+        total_props = session.exec(select(func.count(Property.id)).where(Property.deleted == False)).one()
+        new_props = session.exec(
+            select(func.count(Property.id)).where(Property.createdAt >= month_start, Property.deleted == False)
+        ).one()
+
+        total_visits = session.exec(select(func.count(VisitRequest.id))).one()
+        month_visits = session.exec(
+            select(func.count(VisitRequest.id)).where(VisitRequest.requested_at >= month_start)
+        ).one()
+
+        total_users = session.exec(select(func.count(User.id))).one()
+
+        return {
+            "period": f"{today.strftime('%B %Y')}",
+            "new_properties": new_props,
+            "total_properties": total_props,
+            "visits_this_month": month_visits,
+            "total_visits": total_visits,
+            "total_users": total_users,
+            "summary": f"No mês de {today.strftime('%B %Y')}, foram adicionados {new_props} novos imóveis e recebidos {month_visits} pedidos de visita.",
+        }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

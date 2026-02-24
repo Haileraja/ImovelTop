@@ -1,4 +1,5 @@
-from models import User, Property
+from datetime import date, timedelta
+from models import User, Property, VisitRequest
 from passlib.context import CryptContext
 from sqlmodel import select
 
@@ -6,20 +7,20 @@ from sqlmodel import select
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 mock_users = [
-  {"id": "1", "nome": "Ana Silva", "email": "ana@example.com", "role": "cliente"},
-  {"id": "2", "nome": "João Santos", "email": "joao@example.com", "role": "vendedor"},
-  {"id": "3", "nome": "Admin", "email": "admin@example.com", "role": "admin"}
+  {"id": "1", "nome": "Ana Silva", "email": "ana@example.com", "role": "cliente", "phone": "+258841234567"},
+  {"id": "2", "nome": "João Santos", "email": "joao@example.com", "role": "vendedor", "phone": "+258842345678"},
+  {"id": "3", "nome": "Admin", "email": "admin@example.com", "role": "admin", "phone": "+258843456789"}
 ]
 
 mock_properties = [
   {
     "id": "1",
     "titulo": "Moradia Moderna T4",
-    "descricao": "Moradia moderna com acabamentos de luxo, jardim amplo e piscina. Localizada numa zona tranquila com excelentes acessos.",
+    "descricao": "Moradia moderna com acabamentos de luxo, jardim amplo e piscina. Localizada na Polana Cimento em Maputo.",
     "tipo": "venda",
-    "preco": 450000,
-    "localizacao": "Cascais",
-    "cidade": "Lisboa",
+    "preco": 4500000,
+    "localizacao": "Polana Cimento",
+    "cidade": "Maputo",
     "tipologia": "T4",
     "area": 250,
     "imagem": "https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080",
@@ -43,9 +44,9 @@ mock_properties = [
     "titulo": "Apartamento de Luxo T3",
     "descricao": "Apartamento luxuoso no centro da cidade, com vista para o rio.",
     "tipo": "arrendamento",
-    "preco": 1800,
-    "localizacao": "Parque das Nações",
-    "cidade": "Lisboa",
+    "preco": 18000,
+    "localizacao": "Praia",
+    "cidade": "Maputo",
     "tipologia": "T3",
     "area": 150,
     "imagem": "https://images.unsplash.com/photo-1638454668466-e8dbd5462f20?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=1080",
@@ -65,6 +66,42 @@ mock_properties = [
 ]
 
 
+
+mock_requests = [
+    {
+    "id": "r1",
+    "property_id": "1",
+    "user_id": "1",
+    "requested_at": date.today().isoformat(),
+    "preferred_date": (date.today() + timedelta(days=3)).isoformat(),
+    "preferred_time": "10:00",
+    "phone": "+258841234567",
+    "status": "pending"
+    },
+    {
+    "id": "r2",
+    "property_id": "2",
+    "user_id": "1",
+    "requested_at": date.today().isoformat(),
+    "preferred_date": (date.today() + timedelta(days=5)).isoformat(),
+    "preferred_time": "14:30",
+    "phone": "+258841234567",
+    "status": "pending"
+    },
+    {
+    "id": "r3",
+    "property_id": "3",
+    "user_id": "1",
+    "requested_at": (date.today() - timedelta(days=2)).isoformat(),
+    "preferred_date": (date.today() + timedelta(days=1)).isoformat(),
+    "preferred_time": "09:00",
+    "phone": "+258841234567",
+    "status": "approved",
+    "admin_id": "3",
+    "decided_at": (date.today() - timedelta(days=1)).isoformat()
+    },
+]
+
 def seed(session):
     # seed users if none — set default password `password` (hashed) for demo users
     if not session.exec(select(User)).first():
@@ -83,4 +120,10 @@ def seed(session):
     if not session.exec(select(Property)).first():
         for p in mock_properties:
             session.add(Property(**p))
+
+    # seed visit requests if none
+    if not session.exec(select(VisitRequest)).first():
+        for r in mock_requests:
+            session.add(VisitRequest(**r))
+
     session.commit()
