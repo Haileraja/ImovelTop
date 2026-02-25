@@ -1,3 +1,3 @@
-export function formatMozCurrency(amount: number) {
-  return `MT ${amount.toLocaleString('pt-MZ')}`;
+export function formatMozCurrency(amount: number, locale: string = 'pt-MZ') {
+  return `MT ${amount.toLocaleString(locale)}`;
 }

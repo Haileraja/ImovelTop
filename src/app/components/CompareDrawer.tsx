@@ -5,6 +5,7 @@ import { Badge } from './ui/badge';
 import { formatMozCurrency } from '../utils/format';
 import { resolveImageUrl } from '../api';
 import { X, Check, Minus } from 'lucide-react';
+import { useI18n } from '../i18n';
 
 interface CompareDrawerProps {
   properties: Property[];
@@ -14,36 +15,37 @@ interface CompareDrawerProps {
 }
 
 export function CompareDrawer({ properties, open, onClose, onRemove }: CompareDrawerProps) {
+  const { t } = useI18n();
   if (properties.length === 0) return null;
 
   const fields: { label: string; render: (p: Property) => React.ReactNode }[] = [
-    { label: 'Imagem', render: (p) => (
+    { label: t('compare.image'), render: (p) => (
       <img src={resolveImageUrl(p.imagem)} alt={p.titulo} className="w-full h-24 object-cover rounded"
         onError={(e) => { (e.target as HTMLImageElement).src = 'https://images.unsplash.com/photo-1600596542815-ffad4c1539a9?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&q=80&w=400'; }} />
     )},
-    { label: 'Preço', render: (p) => (
-      <span className="font-bold text-primary">{formatMozCurrency(p.preco)}{p.tipo === 'arrendamento' ? '/mês' : ''}</span>
+    { label: t('compare.price'), render: (p) => (
+      <span className="font-bold text-primary">{formatMozCurrency(p.preco)}{p.tipo === 'arrendamento' ? t('property.perMonth') : ''}</span>
     )},
-    { label: 'Tipo', render: (p) => (
-      <Badge variant={p.tipo === 'venda' ? 'default' : 'secondary'}>{p.tipo === 'venda' ? 'Venda' : 'Arrendamento'}</Badge>
+    { label: t('compare.type'), render: (p) => (
+      <Badge variant={p.tipo === 'venda' ? 'default' : 'secondary'}>{p.tipo === 'venda' ? t('property.sale') : t('property.rent')}</Badge>
     )},
-    { label: 'Tipologia', render: (p) => <span>{p.tipologia}</span> },
-    { label: 'Área', render: (p) => <span>{p.area}m²</span> },
-    { label: 'Quartos', render: (p) => <span>{p.quartos}</span> },
-    { label: 'Casas de Banho', render: (p) => <span>{p.casasBanho}</span> },
-    { label: 'Garagem', render: (p) => p.garagem ? <Check className="w-5 h-5 text-green-500" /> : <Minus className="w-5 h-5 text-muted-foreground" /> },
-    { label: 'Piscina', render: (p) => p.piscina ? <Check className="w-5 h-5 text-green-500" /> : <Minus className="w-5 h-5 text-muted-foreground" /> },
-    { label: 'Jardim', render: (p) => p.jardim ? <Check className="w-5 h-5 text-green-500" /> : <Minus className="w-5 h-5 text-muted-foreground" /> },
-    { label: 'Cidade', render: (p) => <span>{p.cidade}</span> },
-    { label: 'Ano', render: (p) => <span>{p.anoConstructao}</span> },
+    { label: t('compare.typology'), render: (p) => <span>{p.tipologia}</span> },
+    { label: t('compare.area'), render: (p) => <span>{p.area}m²</span> },
+    { label: t('compare.rooms'), render: (p) => <span>{p.quartos}</span> },
+    { label: t('compare.bathrooms'), render: (p) => <span>{p.casasBanho}</span> },
+    { label: t('compare.garage'), render: (p) => p.garagem ? <Check className="w-5 h-5 text-green-500" /> : <Minus className="w-5 h-5 text-muted-foreground" /> },
+    { label: t('compare.pool'), render: (p) => p.piscina ? <Check className="w-5 h-5 text-green-500" /> : <Minus className="w-5 h-5 text-muted-foreground" /> },
+    { label: t('compare.garden'), render: (p) => p.jardim ? <Check className="w-5 h-5 text-green-500" /> : <Minus className="w-5 h-5 text-muted-foreground" /> },
+    { label: t('compare.city'), render: (p) => <span>{p.cidade}</span> },
+    { label: t('compare.year'), render: (p) => <span>{p.anoConstructao}</span> },
   ];
 
   return (
     <Dialog open={open} onOpenChange={(isOpen) => { if (!isOpen) onClose(); }}>
       <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Comparar Imóveis ({properties.length})</DialogTitle>
-          <DialogDescription>Compare as características dos imóveis selecionados</DialogDescription>
+          <DialogTitle>{t('compare.title')} ({properties.length})</DialogTitle>
+          <DialogDescription>{t('compare.subtitle')}</DialogDescription>
         </DialogHeader>
 
         <div className="overflow-x-auto">

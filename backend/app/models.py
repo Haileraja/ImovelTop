@@ -6,13 +6,41 @@ from datetime import date
 class User(SQLModel, table=True):
     id: str = Field(primary_key=True)
     nome: str
-    email: str
+    email: Optional[str] = None
     role: str
     phone: Optional[str] = None
     # store hashed password for credential login (nullable for demo users)
     hashed_password: Optional[str] = None
     email_verified: bool = True  # True for demo/seed users; False for new registrations until verified
     is_active: bool = True  # admin can deactivate accounts
+
+
+class Cliente(SQLModel, table=True):
+    """Independent client registration data."""
+    id: str = Field(primary_key=True)
+    user_id: str  # references User.id
+    nome: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    documento_id: Optional[str] = None  # Documento de identificação
+    nuit: Optional[str] = None  # NUIT
+    comprovativo_residencia: Optional[str] = None  # Comprovativo de residência
+    capacidade_financeira: Optional[str] = None  # Capacidade financeira estimada
+    tipo_interesse: Optional[str] = None  # compra | arrendamento | ambos
+    created_at: str
+
+
+class Vendedor(SQLModel, table=True):
+    """Independent vendor registration data."""
+    id: str = Field(primary_key=True)
+    user_id: str  # references User.id
+    nome: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    empresa: Optional[str] = None  # company name
+    licenca: Optional[str] = None  # license number
+    created_at: str
+
 
 class Property(SQLModel, table=True):
     id: str = Field(primary_key=True)
@@ -22,6 +50,7 @@ class Property(SQLModel, table=True):
     preco: float
     localizacao: str
     cidade: str
+    tipoImovel: Optional[str] = None  # Vivenda, Flat, Escritório, Loja, Armazém, Terreno, Bar, Outro
     tipologia: str
     area: float
     imagem: str
@@ -29,16 +58,47 @@ class Property(SQLModel, table=True):
     vendedorId: str
     vendedorNome: str
     createdAt: str
-    quartos: int
+    quartos: int  # Now represents "Número de salas" (living rooms); bedrooms are defined by tipologia
     casasBanho: int
     garagem: bool = False
+    garagemNumCarros: int = 0
+    garagemFechada: bool = False
+    arCondicionado: bool = False
     piscina: bool = False
+    ginasio: bool = False
+    escritorio: bool = False
+    salaJogos: bool = False
+    salaTV: bool = False
     jardim: bool = False
+    areaLazer: bool = False
+    mobilada: bool = False
+    sistemaSeguranca: bool = False
+    elevador: bool = False
     anoConstructao: int
     certificadoEnergetico: str
+    verificadoAdmin: bool = False   # Admin verification badge
+    verificadoNota: Optional[str] = None  # Admin verification note
     caracteristicas: List[str] = Field(sa_column=Column(JSON))
     deleted: bool = False
     deleted_at: Optional[str] = None
+    # ===== NEW FIELDS FOR DYNAMIC FORM =====
+    negociavel: Optional[str] = None  # "sim" or "nao"
+    tipoAnunciante: Optional[str] = None  # "particular", "agente", "empresa"
+    contacto: Optional[str] = None  # Contact phone/email
+    disponibilidade: Optional[str] = None  # "meio_semana", "fim_semana", "meio_dia", "todo_dia", "dias_especificos"
+    diasEspecificos: Optional[str] = None  # Specific days description
+    latitude: Optional[float] = None  # GPS latitude
+    longitude: Optional[float] = None  # GPS longitude
+    dadosEspecificos: Optional[str] = None  # JSON string with type-specific data
+
+
+class PriceHistory(SQLModel, table=True):
+    """Tracks price changes for properties."""
+    id: str = Field(primary_key=True)
+    property_id: str
+    old_price: float
+    new_price: float
+    changed_at: str
 
 
 class VisitRequest(SQLModel, table=True):

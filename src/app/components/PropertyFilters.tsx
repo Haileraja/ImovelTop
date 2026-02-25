@@ -4,8 +4,9 @@ import { Input } from './ui/input';
 import { Label } from './ui/label';
 import { Button } from './ui/button';
 import { Checkbox } from './ui/checkbox';
-import { Search, X, SlidersHorizontal } from 'lucide-react';
+import { Search, X, SlidersHorizontal, ChevronDown, ChevronUp } from 'lucide-react';
 import { useState } from 'react';
+import { useI18n } from '../i18n';
 
 interface PropertyFiltersProps {
   tipo: PropertyType | 'todos';
@@ -51,187 +52,220 @@ export function PropertyFilters({
   jardim, onJardimChange,
 }: PropertyFiltersProps) {
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const { t } = useI18n();
+
+  // Count active filters
+  const activeCount = [
+    tipo !== 'todos',
+    !!cidade,
+    !!precoMax,
+    !!precoMin,
+    tipologia !== 'todos',
+    !!areaMin,
+    !!areaMax,
+    !!quartos,
+    garagem,
+    piscina,
+    jardim,
+  ].filter(Boolean).length;
 
   return (
-    <div className="bg-card rounded-lg p-6 shadow-sm border">
-      {/* Search bar */}
+    <div className="space-y-4">
+      {/* Main search bar */}
       {onSearchChange && (
-        <div className="mb-4">
-          <div className="relative">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder="Pesquisar imóveis por título, descrição, localização..."
-              value={search || ''}
-              onChange={(e) => onSearchChange(e.target.value)}
-              className="pl-10"
+        <div className="relative">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+          <Input
+            placeholder={t('filters.searchPlaceholder')}
+            value={search || ''}
+            onChange={(e) => onSearchChange(e.target.value)}
+            className="pl-12 h-12 text-base rounded-xl border-2 focus:border-primary bg-card shadow-sm"
+          />
+          {search && (
+            <button onClick={() => onSearchChange('')} className="absolute right-4 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
+              <X className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Filter bar */}
+      <div className="bg-card rounded-xl p-5 shadow-sm border space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <SlidersHorizontal className="w-4 h-4 text-primary" />
+            <span className="font-semibold text-sm">{t('filters.title')}</span>
+            {activeCount > 0 && (
+              <span className="bg-primary text-primary-foreground text-[10px] font-bold px-1.5 py-0.5 rounded-full">{activeCount}</span>
+            )}
+          </div>
+          <div className="flex gap-1.5">
+            <Button variant="ghost" size="sm" onClick={() => setShowAdvanced(!showAdvanced)} className="text-xs gap-1 h-8">
+              {showAdvanced ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {showAdvanced ? t('filters.less') : t('filters.more')}
+            </Button>
+            {activeCount > 0 && (
+              <Button variant="ghost" size="sm" onClick={onClearFilters} className="text-xs gap-1 h-8 text-destructive hover:text-destructive">
+                <X className="w-3.5 h-3.5" />
+                {t('filters.clear')}
+              </Button>
+            )}
+          </div>
+        </div>
+        
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium text-muted-foreground">{t('filters.type')}</Label>
+            <Select value={tipo} onValueChange={(value) => onTipoChange(value as PropertyType | 'todos')}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder={t('filters.select')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="todos">{t('filters.all')}</SelectItem>
+                <SelectItem value="venda">{t('filters.sale')}</SelectItem>
+                <SelectItem value="arrendamento">{t('filters.rent')}</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium text-muted-foreground">{t('filters.city')}</Label>
+            <Input 
+              placeholder={t('filters.cityPlaceholder')} 
+              value={cidade}
+              onChange={(e) => onCidadeChange(e.target.value)}
+              className="h-9"
             />
           </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-between mb-4">
-        <h2 className="text-xl font-semibold flex items-center gap-2">
-          <SlidersHorizontal className="w-5 h-5" />
-          Filtros de Pesquisa
-        </h2>
-        <div className="flex gap-2">
-          <Button variant="ghost" size="sm" onClick={() => setShowAdvanced(!showAdvanced)}>
-            {showAdvanced ? 'Menos filtros' : 'Mais filtros'}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={onClearFilters}>
-            <X className="w-4 h-4 mr-1" />
-            Limpar
-          </Button>
-        </div>
-      </div>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-        <div className="space-y-2">
-          <Label>Tipo</Label>
-          <Select value={tipo} onValueChange={(value) => onTipoChange(value as PropertyType | 'todos')}>
-            <SelectTrigger>
-              <SelectValue placeholder="Selecione o tipo" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="todos">Todos</SelectItem>
-              <SelectItem value="venda">Venda</SelectItem>
-              <SelectItem value="arrendamento">Arrendamento</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-        
-        <div className="space-y-2">
-          <Label>Cidade</Label>
-          <Input 
-            placeholder="Ex: Maputo" 
-            value={cidade}
-            onChange={(e) => onCidadeChange(e.target.value)}
-          />
-        </div>
-        
-        <div className="space-y-2">
-          <Label>Preço Máximo (MT)</Label>
-          <Input 
-            type="number" 
-            placeholder="Ex: 500000" 
-            value={precoMax}
-            onChange={(e) => onPrecoMaxChange(e.target.value)}
-          />
-        </div>
-        
-        <div className="space-y-2">
-          <Label>Tipologia</Label>
-          <Select value={tipologia} onValueChange={onTipologiaChange}>
-            <SelectTrigger>
-              <SelectValue placeholder="Selecione" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="todos">Todas</SelectItem>
-              <SelectItem value="T1">T1</SelectItem>
-              <SelectItem value="T2">T2</SelectItem>
-              <SelectItem value="T3">T3</SelectItem>
-              <SelectItem value="T4">T4</SelectItem>
-              <SelectItem value="T5">T5</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-      </div>
-
-      {/* Advanced filters */}
-      {showAdvanced && (
-        <div className="mt-4 pt-4 border-t space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            {onPrecoMinChange && (
-              <div className="space-y-2">
-                <Label>Preço Mínimo (MT)</Label>
-                <Input
-                  type="number"
-                  placeholder="Ex: 100000"
-                  value={precoMin || ''}
-                  onChange={(e) => onPrecoMinChange(e.target.value)}
-                />
-              </div>
-            )}
-
-            {onAreaMinChange && (
-              <div className="space-y-2">
-                <Label>Área Mín (m²)</Label>
-                <Input
-                  type="number"
-                  placeholder="Ex: 50"
-                  value={areaMin || ''}
-                  onChange={(e) => onAreaMinChange(e.target.value)}
-                />
-              </div>
-            )}
-
-            {onAreaMaxChange && (
-              <div className="space-y-2">
-                <Label>Área Máx (m²)</Label>
-                <Input
-                  type="number"
-                  placeholder="Ex: 500"
-                  value={areaMax || ''}
-                  onChange={(e) => onAreaMaxChange(e.target.value)}
-                />
-              </div>
-            )}
-
-            {onQuartosChange && (
-              <div className="space-y-2">
-                <Label>Quartos (mín)</Label>
-                <Select value={quartos || 'any'} onValueChange={(v) => onQuartosChange(v === 'any' ? '' : v)}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Qualquer" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="any">Qualquer</SelectItem>
-                    <SelectItem value="1">1+</SelectItem>
-                    <SelectItem value="2">2+</SelectItem>
-                    <SelectItem value="3">3+</SelectItem>
-                    <SelectItem value="4">4+</SelectItem>
-                    <SelectItem value="5">5+</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            )}
+          
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium text-muted-foreground">{t('filters.maxPrice')}</Label>
+            <Input 
+              type="number" 
+              placeholder={t('filters.maxPricePlaceholder')} 
+              value={precoMax}
+              onChange={(e) => onPrecoMaxChange(e.target.value)}
+              className="h-9"
+            />
           </div>
-
-          {/* Feature checkboxes */}
-          <div className="flex flex-wrap gap-6">
-            {onGaragemChange && (
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="filter-garagem"
-                  checked={garagem || false}
-                  onCheckedChange={(v) => onGaragemChange(!!v)}
-                />
-                <Label htmlFor="filter-garagem" className="cursor-pointer">Garagem</Label>
-              </div>
-            )}
-            {onPiscinaChange && (
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="filter-piscina"
-                  checked={piscina || false}
-                  onCheckedChange={(v) => onPiscinaChange(!!v)}
-                />
-                <Label htmlFor="filter-piscina" className="cursor-pointer">Piscina</Label>
-              </div>
-            )}
-            {onJardimChange && (
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="filter-jardim"
-                  checked={jardim || false}
-                  onCheckedChange={(v) => onJardimChange(!!v)}
-                />
-                <Label htmlFor="filter-jardim" className="cursor-pointer">Jardim</Label>
-              </div>
-            )}
+          
+          <div className="space-y-1.5">
+            <Label className="text-xs font-medium text-muted-foreground">{t('filters.typology')}</Label>
+            <Select value={tipologia} onValueChange={onTipologiaChange}>
+              <SelectTrigger className="h-9">
+                <SelectValue placeholder={t('filters.select')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="todos">{t('filters.allFeminine')}</SelectItem>
+                <SelectItem value="T1">T1</SelectItem>
+                <SelectItem value="T2">T2</SelectItem>
+                <SelectItem value="T3">T3</SelectItem>
+                <SelectItem value="T4">T4</SelectItem>
+                <SelectItem value="T5">T5</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </div>
-      )}
+
+        {/* Advanced filters */}
+        {showAdvanced && (
+          <div className="pt-3 border-t space-y-4 animate-in fade-in slide-in-from-top-2 duration-200">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {onPrecoMinChange && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">{t('filters.minPrice')}</Label>
+                  <Input
+                    type="number"
+                    placeholder={t('filters.minPricePlaceholder')}
+                    value={precoMin || ''}
+                    onChange={(e) => onPrecoMinChange(e.target.value)}
+                    className="h-9"
+                  />
+                </div>
+              )}
+
+              {onAreaMinChange && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">{t('filters.minArea')}</Label>
+                  <Input
+                    type="number"
+                    placeholder={t('filters.minAreaPlaceholder')}
+                    value={areaMin || ''}
+                    onChange={(e) => onAreaMinChange(e.target.value)}
+                    className="h-9"
+                  />
+                </div>
+              )}
+
+              {onAreaMaxChange && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">{t('filters.maxArea')}</Label>
+                  <Input
+                    type="number"
+                    placeholder={t('filters.maxAreaPlaceholder')}
+                    value={areaMax || ''}
+                    onChange={(e) => onAreaMaxChange(e.target.value)}
+                    className="h-9"
+                  />
+                </div>
+              )}
+
+              {onQuartosChange && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium text-muted-foreground">{t('filters.rooms')}</Label>
+                  <Select value={quartos || 'any'} onValueChange={(v) => onQuartosChange(v === 'any' ? '' : v)}>
+                    <SelectTrigger className="h-9">
+                      <SelectValue placeholder={t('filters.anyRooms')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="any">{t('filters.anyRooms')}</SelectItem>
+                      <SelectItem value="1">1+</SelectItem>
+                      <SelectItem value="2">2+</SelectItem>
+                      <SelectItem value="3">3+</SelectItem>
+                      <SelectItem value="4">4+</SelectItem>
+                      <SelectItem value="5">5+</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+
+            {/* Feature checkboxes */}
+            <div className="flex flex-wrap gap-4">
+              {onGaragemChange && (
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <Checkbox
+                    id="filter-garagem"
+                    checked={garagem || false}
+                    onCheckedChange={(v) => onGaragemChange(!!v)}
+                  />
+                  <span className="text-sm">{t('filters.garage')}</span>
+                </label>
+              )}
+              {onPiscinaChange && (
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <Checkbox
+                    id="filter-piscina"
+                    checked={piscina || false}
+                    onCheckedChange={(v) => onPiscinaChange(!!v)}
+                  />
+                  <span className="text-sm">{t('filters.pool')}</span>
+                </label>
+              )}
+              {onJardimChange && (
+                <label className="flex items-center gap-2 cursor-pointer select-none">
+                  <Checkbox
+                    id="filter-jardim"
+                    checked={jardim || false}
+                    onCheckedChange={(v) => onJardimChange(!!v)}
+                  />
+                  <span className="text-sm">{t('filters.garden')}</span>
+                </label>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -22,20 +22,21 @@ async function request(path: string, options: RequestInit = {}) {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    let detail = text || res.statusText;
+    try {
+      const json = JSON.parse(text);
+      if (json.detail) detail = typeof json.detail === 'string' ? json.detail : JSON.stringify(json.detail);
+    } catch {}
+    throw new Error(detail);
   }
   return res.json().catch(() => null);
 }
 
-export async function loginByRole(role: string) {
-  return request('/auth/login', { method: 'POST', body: JSON.stringify({ role }) });
+export async function loginWithCredentials(identifier: string, password: string) {
+  return request('/auth/token', { method: 'POST', body: JSON.stringify({ identifier, password }) });
 }
 
-export async function loginWithCredentials(email: string, password: string) {
-  return request('/auth/token', { method: 'POST', body: JSON.stringify({ email, password }) });
-}
-
-export async function registerUser(nome: string, email: string, password: string, role: string, phone?: string) {
+export async function registerUser(nome: string, password: string, role: string, email?: string, phone?: string) {
   return request('/auth/register', { method: 'POST', body: JSON.stringify({ nome, email, password, role, phone }) });
 }
 
@@ -68,7 +69,12 @@ export async function uploadProperty(formData: FormData) {
   const res = await fetch(API, { method: 'POST', body: formData, headers });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || res.statusText);
+    let detail = text || res.statusText;
+    try {
+      const json = JSON.parse(text);
+      if (json.detail) detail = typeof json.detail === 'string' ? json.detail : JSON.stringify(json.detail);
+    } catch {}
+    throw new Error(detail);
   }
   return res.json().catch(() => null);
 }
@@ -105,6 +111,10 @@ export async function requestVisit(propertyId: string, payload: { preferred_date
   return request(`/properties/${propertyId}/visit-requests`, { method: 'POST', body: JSON.stringify(payload) });
 }
 
+export async function fetchVisitAvailability(propertyId: string, visitDate: string) {
+  return request(`/properties/${propertyId}/visit-availability?date=${encodeURIComponent(visitDate)}`, { method: 'GET' });
+}
+
 export async function fetchMyVisitRequests() {
   return request('/my/visit-requests', { method: 'GET' });
 }
@@ -121,8 +131,24 @@ export async function updateProfile(payload: { nome?: string; email?: string; ph
   return request('/auth/profile', { method: 'PATCH', body: JSON.stringify(payload) });
 }
 
+export async function fetchKYC() {
+  return request('/auth/kyc', { method: 'GET' });
+}
+
+export async function updateKYC(payload: { documento_id?: string; nuit?: string; comprovativo_residencia?: string; capacidade_financeira?: string; tipo_interesse?: string }) {
+  return request('/auth/kyc', { method: 'PATCH', body: JSON.stringify(payload) });
+}
+
 export async function fetchUsers() {
   return request('/users', { method: 'GET' });
+}
+
+export async function fetchClientes() {
+  return request('/clientes', { method: 'GET' });
+}
+
+export async function fetchVendedores() {
+  return request('/vendedores', { method: 'GET' });
 }
 
 export async function fetchVisitRequests() {
@@ -193,6 +219,10 @@ export async function createReview(propertyId: string, data: { rating: number; c
     method: 'POST',
     body: JSON.stringify(data),
   });
+}
+
+export async function checkMyReview(propertyId: string): Promise<{ has_reviewed: boolean; review: any | null }> {
+  return request(`/properties/${propertyId}/reviews/check`, { method: 'GET' });
 }
 
 // ---- Password Reset ----
@@ -268,22 +298,42 @@ export async function fetchDeletedProperties() {
   return request('/admin/deleted-properties', { method: 'GET' });
 }
 
+// ---- Admin Property Verification ----
+export async function adminVerifyProperty(propertyId: string, verificado: boolean, nota?: string) {
+  return request(`/admin/properties/${propertyId}/verify`, {
+    method: 'PATCH',
+    body: JSON.stringify({ verificado, nota }),
+  });
+}
+
+// ---- Price History ----
+export async function fetchPriceHistory(propertyId: string) {
+  return request(`/properties/${propertyId}/price-history`, { method: 'GET' });
+}
+
+// ---- Watermark ----
+export async function watermarkProperty(propertyId: string) {
+  return request(`/admin/watermark/${propertyId}`, { method: 'POST' });
+}
+
 export { getToken, setToken };
 export default {
-  loginByRole, loginWithCredentials, registerUser, fetchProperties, fetchPropertiesCount,
+  loginWithCredentials, registerUser, fetchProperties, fetchPropertiesCount,
   createProperty, uploadProperty, uploadPropertyWithProgress, deleteProperty,
   updateProperty, restoreProperty,
   getCurrentUser, getToken, setToken, requestVisit, fetchVisitRequests,
   fetchMyVisitRequests, cancelVisitRequest, updateMyVisitRequest,
-  fetchUsers, updateVisitRequest, updateProfile,
+  fetchUsers, fetchClientes, fetchVendedores, updateVisitRequest, updateProfile,
   fetchMyFavorites, addFavorite, removeFavorite,
   fetchMyNotifications, markNotificationRead, markAllNotificationsRead,
   fetchChatConversations, fetchChatMessages, sendChatMessage,
-  fetchReviews, createReview,
+  fetchReviews, createReview, checkMyReview,
   forgotPassword, resetPassword,
   verifyEmail, resendVerificationCode,
   fetchAdminStats, fetchVendorVisitRequests, vendorUpdateVisit, fetchVendorStats,
   fetchAdminReport,
   changePassword, deleteAccount,
   adminUpdateUser, fetchDeletedProperties,
+  adminVerifyProperty, fetchPriceHistory, watermarkProperty,
+  fetchKYC, updateKYC,
 };

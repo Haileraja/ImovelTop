@@ -7,7 +7,8 @@ import { Badge } from './ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table';
 import { fetchVendorVisitRequests, vendorUpdateVisit, fetchVendorStats } from '../api';
 import { toast } from 'sonner';
-import { CalendarDays, Home, BarChart3, Clock, CheckCircle2, XCircle, ArrowLeft, Loader2, Star, Heart } from 'lucide-react';
+import { useI18n } from '../i18n';
+import { CalendarDays, Home, BarChart3, Clock, CheckCircle2, XCircle, ArrowLeft, Loader2, Star, Heart, Pencil } from 'lucide-react';
 
 interface VendedorPageProps {
   currentUser: User;
@@ -15,12 +16,16 @@ interface VendedorPageProps {
   onViewDetails: (p: Property) => void;
   onNavigate: (view: string) => void;
   onDelete: (id: string) => void;
+  onEdit?: (p: Property) => void;
   onLogout?: () => void;
+  // When true, component is rendered inside a drawer (skip container margins, hide user header card)
+  inDrawerMode?: boolean;
 }
 
 type VendorTab = 'properties' | 'visits' | 'stats';
 
-export function VendedorPage({ currentUser, properties, onViewDetails, onNavigate, onDelete, onLogout }: VendedorPageProps & { onLogout: () => void }) {
+export function VendedorPage({ currentUser, properties, onViewDetails, onNavigate, onDelete, onEdit, onLogout, inDrawerMode = false }: VendedorPageProps & { onLogout: () => void }) {
+  const { t, lang } = useI18n();
   const myProps = properties.filter(p => p.vendedorId === currentUser.id);
   const [tab, setTab] = useState<VendorTab>('properties');
   const [visitRequests, setVisitRequests] = useState<VisitRequest[]>([]);
@@ -53,13 +58,15 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
   const rejectedVisits = visitRequests.filter(v => v.status === 'rejected');
 
   const tabs: { key: VendorTab; label: string; icon: React.ReactNode; badge?: number }[] = [
-    { key: 'properties', label: 'Meus Imóveis', icon: <Home className="w-4 h-4" />, badge: myProps.length },
-    { key: 'visits', label: 'Pedidos de Visita', icon: <CalendarDays className="w-4 h-4" />, badge: pendingVisits.length },
-    { key: 'stats', label: 'Estatísticas', icon: <BarChart3 className="w-4 h-4" /> },
+    { key: 'properties', label: t('vendor.myProperties'), icon: <Home className="w-4 h-4" />, badge: myProps.length },
+    { key: 'visits', label: t('vendor.visitRequests'), icon: <CalendarDays className="w-4 h-4" />, badge: pendingVisits.length },
+    { key: 'stats', label: t('vendor.stats'), icon: <BarChart3 className="w-4 h-4" /> },
   ];
 
   return (
-    <main className="container mx-auto px-4 py-8">
+    <main className={inDrawerMode ? "py-2" : "container mx-auto px-4 py-8"}>
+      {/* Header - skip in drawer mode */}
+      {!inDrawerMode && (
       <div className="mb-6">
         <Card className="mb-4">
           <CardContent className="flex items-center justify-between py-4">
@@ -69,38 +76,39 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
               <div className="text-xs capitalize text-muted-foreground mt-0.5">{currentUser.role}</div>
             </div>
             <div className="flex gap-2">
-              <Button onClick={() => onNavigate('add-property')}>Adicionar Imóvel</Button>
-              <Button variant="outline" onClick={onLogout}>Sair</Button>
+              <Button onClick={() => onNavigate('add-property')}>{t('vendor.addProperty')}</Button>
+              <Button variant="outline" onClick={onLogout}>{t('vendor.logout')}</Button>
             </div>
           </CardContent>
         </Card>
 
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h2 className="text-2xl font-semibold">Painel do Vendedor</h2>
-            <p className="text-sm text-muted-foreground">Gerencie seus anúncios, veja pedidos de visita e estatísticas.</p>
+            <h2 className="text-2xl font-semibold">{t('vendor.panel')}</h2>
+            <p className="text-sm text-muted-foreground">{t('vendor.panelDesc')}</p>
           </div>
         </div>
+      </div>
+      )}
 
         {/* Tab navigation */}
-        <div className="flex gap-2 border-b pb-2">
+        <div className="flex gap-1 bg-muted/50 p-1 rounded-xl overflow-x-auto mb-6">
           {tabs.map((t) => (
             <Button
               key={t.key}
               variant={tab === t.key ? 'default' : 'ghost'}
               size="sm"
               onClick={() => setTab(t.key)}
-              className="gap-2"
+              className={`gap-1.5 shrink-0 rounded-lg transition-all ${tab === t.key ? 'shadow-sm' : ''}`}
             >
               {t.icon}
               {t.label}
               {t.badge != null && t.badge > 0 && (
-                <span className="ml-1 bg-primary/20 text-primary text-xs font-bold rounded-full px-1.5 py-0.5">{t.badge}</span>
+                <span className={`ml-0.5 text-[10px] font-bold rounded-full min-w-[18px] text-center px-1 py-0.5 ${tab === t.key ? 'bg-primary-foreground/20 text-primary-foreground' : 'bg-primary/10 text-primary'}`}>{t.badge}</span>
               )}
             </Button>
           ))}
         </div>
-      </div>
 
       {/* Tab: Meus Imóveis */}
       {tab === 'properties' && (
@@ -111,9 +119,15 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
                 <div key={p.id}>
                   <PropertyCard property={p} onViewDetails={onViewDetails} />
                   <div className="flex gap-2 mt-2">
+                    {onEdit && (
+                      <Button variant="outline" size="sm" onClick={() => onEdit(p)} className="gap-1">
+                        <Pencil className="w-3.5 h-3.5" />
+                        {t('vendor.edit')}
+                      </Button>
+                    )}
                     <Button variant="destructive" size="sm" onClick={() => {
-                      if (confirm(`Tem certeza que deseja eliminar "${p.titulo}"?`)) onDelete(p.id);
-                    }}>Eliminar</Button>
+                      if (confirm(t('vendor.confirmDelete', { title: p.titulo }))) onDelete(p.id);
+                    }}>{t('vendor.delete')}</Button>
                   </div>
                 </div>
               ))}
@@ -121,10 +135,10 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
           ) : (
             <Card>
               <CardHeader>
-                <CardTitle>Nenhum imóvel</CardTitle>
+                <CardTitle>{t('vendor.noProperties')}</CardTitle>
               </CardHeader>
               <CardContent>
-                <p className="text-muted-foreground">Você ainda não tem imóveis anunciados. Clique em "Adicionar Imóvel" para criar um anúncio.</p>
+                <p className="text-muted-foreground">{t('vendor.noPropertiesDesc')}</p>
               </CardContent>
             </Card>
           )}
@@ -135,22 +149,22 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
       {tab === 'visits' && (
         <Card>
           <CardHeader className="flex flex-row items-center justify-between">
-            <CardTitle>Pedidos de Visita aos Meus Imóveis</CardTitle>
+            <CardTitle>{t('vendor.visitRequestsTitle')}</CardTitle>
             <Button variant="outline" size="sm" onClick={loadVisits} disabled={loadingVisits}>
-              {loadingVisits ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Atualizar'}
+              {loadingVisits ? <Loader2 className="w-4 h-4 animate-spin" /> : t('vendor.refresh')}
             </Button>
           </CardHeader>
           <CardContent>
             {loadingVisits && visitRequests.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">
                 <Loader2 className="w-8 h-8 animate-spin mx-auto mb-2" />
-                Carregando...
+                {t('vendor.loading')}
               </div>
             ) : visitRequests.length === 0 ? (
               <div className="text-center py-12 text-muted-foreground">
                 <CalendarDays className="w-12 h-12 mx-auto mb-3 opacity-40" />
-                <p className="text-lg font-medium">Nenhum pedido de visita</p>
-                <p className="text-sm mt-1">Quando clientes agendarem visitas aos seus imóveis, aparecerão aqui.</p>
+                <p className="text-lg font-medium">{t('vendor.noVisitRequests')}</p>
+                <p className="text-sm mt-1">{t('vendor.noVisitRequestsDesc')}</p>
               </div>
             ) : (
               <div className="space-y-3">
@@ -171,18 +185,18 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
                             variant={v.status === 'approved' ? 'default' : v.status === 'rejected' ? 'destructive' : 'secondary'}
                             className="text-xs"
                           >
-                            {v.status === 'approved' ? 'Aprovado' : v.status === 'rejected' ? 'Rejeitado' : 'Pendente'}
+                            {v.status === 'approved' ? t('visit.approved') : v.status === 'rejected' ? t('visit.rejected') : t('visit.pending')}
                           </Badge>
                         </div>
                         <div className="text-sm text-muted-foreground">
-                          <span className="font-medium">Cliente:</span> {v.user_name}
-                          {v.phone && <span className="ml-3">Tel: {v.phone}</span>}
+                          <span className="font-medium">{t('vendor.client')}:</span> {v.user_name}
+                          {v.phone && <span className="ml-3">{t('vendor.tel')}: {v.phone}</span>}
                         </div>
                         <div className="text-sm text-muted-foreground flex items-center gap-4">
                           {v.preferred_date && (
                             <span className="flex items-center gap-1">
                               <CalendarDays className="w-3.5 h-3.5" />
-                              {new Date(v.preferred_date).toLocaleDateString('pt-MZ')}
+                              {new Date(v.preferred_date).toLocaleDateString(lang === 'pt' ? 'pt-MZ' : 'en-US')}
                             </span>
                           )}
                           {v.preferred_time && (
@@ -193,7 +207,7 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
                           )}
                         </div>
                         {v.admin_note && (
-                          <div className="text-sm italic text-muted-foreground">Nota: {v.admin_note}</div>
+                          <div className="text-sm italic text-muted-foreground">{t('vendor.note')}: {v.admin_note}</div>
                         )}
                       </div>
                       {v.status === 'pending' && (
@@ -201,20 +215,20 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
                           <Button size="sm" variant="default" onClick={async () => {
                             try {
                               await vendorUpdateVisit(v.id, { status: 'approved' });
-                              toast.success('Visita aprovada');
+                              toast.success(t('vendor.visitApproved'));
                               loadVisits();
-                            } catch (err: any) { toast.error('Falha: ' + (err.message || 'Erro')); }
+                            } catch (err: any) { toast.error(t('vendor.failAction') + ': ' + (err.message || 'Erro')); }
                           }}>
-                            <CheckCircle2 className="w-4 h-4 mr-1" />Aprovar
+                            <CheckCircle2 className="w-4 h-4 mr-1" />{t('vendor.approve')}
                           </Button>
                           <Button size="sm" variant="destructive" onClick={async () => {
                             try {
                               await vendorUpdateVisit(v.id, { status: 'rejected' });
-                              toast.success('Visita rejeitada');
+                              toast.success(t('vendor.visitRejected'));
                               loadVisits();
-                            } catch (err: any) { toast.error('Falha: ' + (err.message || 'Erro')); }
+                            } catch (err: any) { toast.error(t('vendor.failAction') + ': ' + (err.message || 'Erro')); }
                           }}>
-                            <XCircle className="w-4 h-4 mr-1" />Rejeitar
+                            <XCircle className="w-4 h-4 mr-1" />{t('vendor.reject')}
                           </Button>
                         </div>
                       )}
@@ -223,10 +237,10 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
                           <Button size="sm" variant="outline" onClick={async () => {
                             try {
                               await vendorUpdateVisit(v.id, { status: 'concluded' });
-                              toast.success('Visita concluída');
+                              toast.success(t('vendor.visitConcluded'));
                               loadVisits();
-                            } catch (err: any) { toast.error('Falha: ' + (err.message || 'Erro')); }
-                          }}>Concluir</Button>
+                            } catch (err: any) { toast.error(t('vendor.failAction') + ': ' + (err.message || 'Erro')); }
+                          }}>{t('vendor.conclude')}</Button>
                         </div>
                       )}
                     </div>
@@ -247,52 +261,52 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Total Imóveis</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.totalProperties')}</div>
                   <div className="text-3xl font-bold mt-1">{vendorStatsData.properties.total}</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Para Venda</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.forSale')}</div>
                   <div className="text-3xl font-bold mt-1 text-primary">{vendorStatsData.properties.venda}</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Para Arrendamento</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.forRent')}</div>
                   <div className="text-3xl font-bold mt-1">{vendorStatsData.properties.arrendamento}</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Visitas Pendentes</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.pendingVisits')}</div>
                   <div className="text-3xl font-bold mt-1 text-yellow-600">{vendorStatsData.visits.pending}</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Visitas Aprovadas</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.approvedVisits')}</div>
                   <div className="text-3xl font-bold mt-1 text-green-600">{vendorStatsData.visits.approved}</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Total Visitas</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.totalVisits')}</div>
                   <div className="text-3xl font-bold mt-1">{vendorStatsData.visits.total}</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground"><Star className="w-4 h-4" />Avaliações</div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground"><Star className="w-4 h-4" />{t('vendor.reviews')}</div>
                   <div className="text-3xl font-bold mt-1">{vendorStatsData.reviews.total}</div>
                   {vendorStatsData.reviews.average_rating > 0 && (
-                    <div className="text-sm text-muted-foreground mt-1">Média: {vendorStatsData.reviews.average_rating} estrelas</div>
+                    <div className="text-sm text-muted-foreground mt-1">{t('vendor.avgRating', { rating: vendorStatsData.reviews.average_rating })}</div>
                   )}
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground"><Heart className="w-4 h-4" />Favoritos</div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground"><Heart className="w-4 h-4" />{t('vendor.favorites')}</div>
                   <div className="text-3xl font-bold mt-1">{vendorStatsData.favorites}</div>
                 </CardContent>
               </Card>
@@ -301,13 +315,13 @@ export function VendedorPage({ currentUser, properties, onViewDetails, onNavigat
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Total Imóveis</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.totalProperties')}</div>
                   <div className="text-3xl font-bold mt-1">{myProps.length}</div>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="pt-6">
-                  <div className="text-sm text-muted-foreground">Visitas Pendentes</div>
+                  <div className="text-sm text-muted-foreground">{t('vendor.pendingVisits')}</div>
                   <div className="text-3xl font-bold mt-1 text-yellow-600">{pendingVisits.length}</div>
                 </CardContent>
               </Card>

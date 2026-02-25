@@ -21,6 +21,15 @@ export default defineConfig({
   assetsInclude: ['**/*.svg', '**/*.csv'],
 
   server: {
+    // Allow access on any port; configure HMR so the WebSocket
+    // always connects back to the actual Vite dev-server port.
+    hmr: {
+      // When the browser URL differs from the Vite server port
+      // (e.g. accessed via 5181 but Vite is on 5173), the
+      // WebSocket must target the real Vite port.
+      clientPort: undefined,   // auto-detect; set to 5173 if auto fails
+      protocol: 'ws',
+    },
     proxy: {
       '/uploads': {
         target: 'http://localhost:8000',

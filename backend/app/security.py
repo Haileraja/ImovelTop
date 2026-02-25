@@ -1,10 +1,11 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session, select
 import os
+import secrets
 from dotenv import load_dotenv
 from passlib.context import CryptContext
 
@@ -14,8 +15,15 @@ from models import User
 # load environment variables from backend/.env (if present)
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
 
-# SECRET_KEY should come from environment for safety; fallback only for dev
-SECRET_KEY = os.getenv('SECRET_KEY', 'CHANGE_THIS_SECRET_KEY')
+# SECRET_KEY should come from environment for safety; random fallback for dev
+_DEFAULT_SECRET = secrets.token_urlsafe(64)
+SECRET_KEY = os.getenv('SECRET_KEY', _DEFAULT_SECRET)
+if not os.getenv('SECRET_KEY'):
+    import logging as _log
+    _log.getLogger('imobiliaria').warning(
+        'SECRET_KEY not set — using random key. Sessions will invalidate on restart. '
+        'Set SECRET_KEY in backend/.env for persistent tokens.'
+    )
 ALGORITHM = os.getenv('JWT_ALGORITHM', 'HS256')
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv('ACCESS_TOKEN_EXPIRE_MINUTES', 60 * 24 * 7))
 
@@ -36,9 +44,9 @@ def get_password_hash(password: str) -> str:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
@@ -60,6 +68,11 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: Session
     user = session.get(User, user_id)
     if not user:
         raise credentials_exception
+    if not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Conta desactivada. Contacte o suporte.",
+        )
     return user
 
 

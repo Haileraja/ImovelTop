@@ -1,5 +1,5 @@
-from datetime import date, timedelta
-from models import User, Property, VisitRequest
+from datetime import date, datetime, timedelta, timezone
+from models import User, Property, VisitRequest, Cliente, Vendedor
 from passlib.context import CryptContext
 from sqlmodel import select
 
@@ -9,7 +9,8 @@ pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 mock_users = [
   {"id": "1", "nome": "Ana Silva", "email": "ana@example.com", "role": "cliente", "phone": "+258841234567"},
   {"id": "2", "nome": "João Santos", "email": "joao@example.com", "role": "vendedor", "phone": "+258842345678"},
-  {"id": "3", "nome": "Admin", "email": "admin@example.com", "role": "admin", "phone": "+258843456789"}
+  {"id": "3", "nome": "Admin", "email": "admin@example.com", "role": "admin", "phone": "+258843456789"},
+  {"id": "4", "nome": "ImovelTop", "email": "admin@imoveltop.co.mz", "role": "admin", "phone": "+258840000000"},
 ]
 
 mock_properties = [
@@ -90,7 +91,7 @@ mock_requests = [
     },
     {
     "id": "r3",
-    "property_id": "3",
+    "property_id": "2",
     "user_id": "1",
     "requested_at": (date.today() - timedelta(days=2)).isoformat(),
     "preferred_date": (date.today() + timedelta(days=1)).isoformat(),
@@ -106,7 +107,8 @@ def seed(session):
     # seed users if none — set default password `password` (hashed) for demo users
     if not session.exec(select(User)).first():
         for u in mock_users:
-            user_data = {**u, "hashed_password": pwd_context.hash("password")}
+            pw = "Haile123" if u["nome"] == "ImovelTop" else "password"
+            user_data = {**u, "hashed_password": pwd_context.hash(pw), "email_verified": True}
             session.add(User(**user_data))
     else:
         # ensure existing users have a hashed_password set
@@ -125,5 +127,16 @@ def seed(session):
     if not session.exec(select(VisitRequest)).first():
         for r in mock_requests:
             session.add(VisitRequest(**r))
+
+    # seed role-specific tables
+    now = datetime.now(timezone.utc).isoformat()
+    if not session.exec(select(Cliente)).first():
+        for u in mock_users:
+            if u["role"] == "cliente":
+                session.add(Cliente(id=f"cli-{u['id']}", user_id=u["id"], nome=u["nome"], email=u["email"], phone=u.get("phone"), created_at=now))
+    if not session.exec(select(Vendedor)).first():
+        for u in mock_users:
+            if u["role"] == "vendedor":
+                session.add(Vendedor(id=f"ven-{u['id']}", user_id=u["id"], nome=u["nome"], email=u["email"], phone=u.get("phone"), created_at=now))
 
     session.commit()
